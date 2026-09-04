@@ -382,16 +382,11 @@ class TestGitProtection:
         assert rc in (0, 1)
 
     def test_repository_scan_clean_of_operator_credentials(self):
-        """25(A): repo scan finds zero operator credential material."""
+        """25(A): repo scan finds zero operator credential material.
+
+        Engine artifacts (patches/, packages/) were relocated outside the
+        repository in the direct-agent-mode wave, so the entire tree —
+        including the sanitized fixtures — must scan completely clean."""
         from core.secret_scanner import scan_tree
         findings = scan_tree(REPO_ROOT)
-        reasons = {f.reason for f in findings}
-        # After migration the only acceptable finding classes are documented
-        # engine artifacts (patches/ kept deliberately, excluded from shares)
-        allowed = {"high_entropy_near_credential_word", "sensitive_key_value", "private_filename"}
-        assert reasons <= allowed, f"unexpected finding classes: {reasons - allowed}"
-        # No operator-private file may remain inside the repository
-        for f in findings:
-            if f.reason == "private_filename":
-                assert "patches/" in f.file or "packages/" in f.file or "backup/" in f.file, \
-                    f"private material still in repo: {f.file}"
+        assert findings == [], f"unexpected findings: {[(f.file, f.reason) for f in findings]}"

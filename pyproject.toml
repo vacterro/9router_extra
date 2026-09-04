@@ -30,7 +30,8 @@ vault = [
 testpaths = ["9router_WatchEdit/tests"]
 python_files = ["test_*.py"]
 pythonpath = ["9router_WatchEdit"]
-addopts = "-m \"not integration\""
+addopts = "-m \"not integration and not local_trusted\""
 markers = [
     "integration: marks tests requiring live local 9router environment (run with 'pytest -m integration'; excluded from the default suite)",
+    "local_trusted: marks tests that may interact with the local trusted runtime (run with 'pytest -m local_trusted'; never run implicitly)",
 ]

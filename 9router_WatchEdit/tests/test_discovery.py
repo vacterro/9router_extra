@@ -55,6 +55,7 @@ def test_discovery_synthetic_mock():
     assert canon_ids["extra/ghost-model"].is_combo_member is True
 
 @pytest.mark.integration
+@pytest.mark.local_trusted
 def test_live_local_discovery():
     client = RouterClient()
     discovery = ModelDiscovery(client)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import os
 import shutil
 import subprocess
@@ -142,15 +143,30 @@ def build_safe_share(out_dir: Path = None, skip_gitleaks: bool = False, quiet: b
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst)
 
-        # MANDATORY internal scan of every staged file
+        # MANDATORY gate 1: full agent-safe verification of the staged tree
+        # (content scan + protected paths), performed close to mutation.
+        from verify_agent_safe import verify_agent_safe
+        unsafe = verify_agent_safe(staging)
+        if unsafe:
+            print("SAFE EXPORT BLOCKED")
+            for u in unsafe:
+                print(f"{u.path}\n  {u.reason}")
+            return None
         findings = []
         for p in sorted(staging.rglob("*")):
             if p.is_file():
                 findings.extend(scan_file(p, staging))
-
         if findings:
             print(format_report(findings))
             return None
+
+        # RACE-003: hash manifest captured at validation time; every file is
+        # re-hashed immediately before it enters the archive. Any staged-file
+        # mutation after validation aborts the export.
+        manifest = {}
+        for p in sorted(staging.rglob("*")):
+            if p.is_file():
+                manifest[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
 
         # Optional industry scanner
         if not skip_gitleaks and not run_gitleaks(staging):
@@ -162,10 +178,37 @@ def build_safe_share(out_dir: Path = None, skip_gitleaks: bool = False, quiet: b
 
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_path = out_dir / f"9router_WatchEdit_SAFE_{stamp}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in sorted(staging.rglob("*")):
-                if p.is_file():
-                    zf.write(p, p.relative_to(staging))
+        # EXPORT-004: build under a temporary name, promote atomically on success
+        tmp_zip = out_dir / f".SAFE_{stamp}.partial.zip"
+        try:
+            try:
+                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for p in sorted(staging.rglob("*")):
+                        if not p.is_file():
+                            continue
+                        current = hashlib.sha256(p.read_bytes()).hexdigest()
+                        if manifest.get(str(p)) != current:
+                            print("SAFE EXPORT BLOCKED")
+                            print(f"file: {p.relative_to(staging)}")
+                            print("reason: staged file changed after validation (race protection)")
+                            return None
+                        try:
+                            zf.write(p, p.relative_to(staging))
+                        except Exception as ex:
+                            print("SAFE EXPORT BLOCKED")
+                            print(f"file: {p.relative_to(staging)}")
+                            print(f"reason: archive write failed ({type(ex).__name__})")
+                            return None
+                os.replace(tmp_zip, zip_path)
+            except Exception as ex:
+                # EXPORT-004: mid-archive failure never raises raw and never
+                # leaves a half-built archive under the final name
+                print("SAFE EXPORT BLOCKED")
+                print(f"reason: archive creation failed ({type(ex).__name__})")
+                return None
+        finally:
+            if tmp_zip.exists():
+                tmp_zip.unlink()
         if not quiet:
             print(f"SAFE archive created: {zip_path}")
             print(f"Files included: {sum(1 for _ in staging.rglob('*') if _.is_file())}")

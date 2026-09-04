@@ -47,16 +47,18 @@ DEPLOY_MANIFEST = [
 ]
 NEVER_DEPLOY_HINTS = ("backup", "secrets", "private", "runtime", "vault", ".sqlite", ".env")
 
+import verify_agent_safe as vas  # noqa: E402  (module-level for testability)
+
 PRIVATE_RUNTIME_ROOT = Path(os.environ.get("WATCHEDIT_DATA_DIR")
                             or Path(os.environ.get("LOCALAPPDATA", "")) / "9router_WatchEdit")
 
 
-def _git(args: List[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(REPO_ROOT)] + args, capture_output=True, text=True)
+def _git(args: List[str], repo_root: Path = REPO_ROOT) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo_root)] + args, capture_output=True, text=True)
 
 
 def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests: bool = False,
-                 quiet: bool = False) -> bool:
+                 quiet: bool = False, repo_root: Path = REPO_ROOT) -> bool:
     steps: List[str] = []
 
     def log(msg: str):
@@ -64,31 +66,30 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
             print(msg)
 
     # 1. Secret-free repository
-    from verify_agent_safe import format_result, verify_agent_safe
-    findings = verify_agent_safe(REPO_ROOT)
+    findings = vas.verify_agent_safe(repo_root)
     if findings:
-        log(format_result(findings))
+        log(vas.format_result(findings))
         log("\nDEPLOY ABORTED: repository is not agent-safe.")
         return False
     steps.append("1. secret-free verification: OK")
 
     # 2. Working tree / revision
-    if _git(["rev-parse", "--is-inside-work-tree"]).returncode != 0:
+    if _git(["rev-parse", "--is-inside-work-tree"], repo_root).returncode != 0:
         log("DEPLOY ABORTED: not a git repository.")
         return False
-    status = _git(["status", "--porcelain"])
+    status = _git(["status", "--porcelain"], repo_root)
     if status.stdout.strip():
         log("DEPLOY ABORTED: working tree not clean. Commit or stash first.")
         log(status.stdout)
         return False
-    original_ref = _git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
-    original_sha = _git(["rev-parse", "HEAD"]).stdout.strip()
+    original_ref = _git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root).stdout.strip()
+    original_sha = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
     steps.append(f"2. revision: {original_ref} @ {original_sha[:10]} (clean)")
 
     # 3. Unit tests
     if not skip_tests:
         tr = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header"],
-                            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900)
+                            cwd=str(repo_root), capture_output=True, text=True, timeout=900)
         if tr.returncode != 0:
             log((tr.stdout or tr.stderr).strip().splitlines()[-1] if tr.stdout else "tests failed")
             log("DEPLOY ABORTED: unit tests failed.")
@@ -103,21 +104,28 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
 
     # 5. Rollback point
     tag = f"predeploy/{time.strftime('%Y%m%d_%H%M%S')}"
-    _git(["tag", "-f", tag, original_sha])
+    _git(["tag", "-f", tag, original_sha], repo_root)
     steps.append(f"5. rollback point: git tag {tag}")
 
     deployed = False
     try:
+        # RACE-001: re-verify immediately before mutation — an earlier PASS
+        # must never permanently authorize a since-changed tree.
+        findings2 = vas.verify_agent_safe(repo_root)
+        if findings2:
+            log("DEPLOY FAILED: repository became unsafe after initial verification (race protection).")
+            raise RuntimeError("re-verification failed")
+
         # 6. Stop running instance only when required
         if restart:
-            stopped = _stop_running_instance()
+            stopped = _stop_running_instance(repo_root)
             steps.append(f"6. running instance: {'stopped' if stopped else 'none found'}")
         else:
             steps.append("6. running instance: left as-is (no --restart)")
 
         # 7. Deploy CODE only
         if source:
-            res = _git(["checkout", source])
+            res = _git(["checkout", source], repo_root)
             if res.returncode != 0:
                 log(f"DEPLOY FAILED at checkout of {source}: {res.stderr.strip()}")
                 raise RuntimeError("checkout failed")
@@ -130,7 +138,7 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
 
         # 9. Restart / reload
         if restart:
-            launched = _start_instance()
+            launched = _start_instance(repo_root)
             steps.append(f"9. app restart: {'launched' if launched else 'launch FAILED'}")
             if not launched:
                 raise RuntimeError("restart failed")
@@ -138,7 +146,7 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
             steps.append("9. app restart: skipped (no --restart)")
 
         # 10. Local smoke test
-        ok, detail = _smoke_test()
+        ok, detail = _smoke_test(repo_root)
         steps.append(f"10. smoke test: {'OK' if ok else detail}")
         if not ok:
             raise RuntimeError(f"smoke test failed: {detail}")
@@ -146,8 +154,8 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         deployed = True
     except RuntimeError as ex:
         # 12. Rollback code; private state remains untouched
-        _git(["checkout", "-f", original_ref])
-        _git(["checkout", original_ref])
+        _git(["checkout", "-f", original_ref], repo_root)
+        _git(["checkout", original_ref], repo_root)
         log(f"ROLLBACK CODE -> {original_ref} @ {original_sha[:10]} ({ex})")
         log("Private runtime state was not touched.")
         deployed = False
@@ -161,7 +169,7 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
     return deployed
 
 
-def _stop_running_instance() -> bool:
+def _stop_running_instance(repo_root: Path = REPO_ROOT) -> bool:
     """Stops WatchEdit instances launched from THIS repository (pythonw run.py)."""
     try:
         listing = subprocess.run(
@@ -176,7 +184,7 @@ def _stop_running_instance() -> bool:
         return False
 
 
-def _start_instance() -> bool:
+def _start_instance(repo_root: Path = REPO_ROOT) -> bool:
     try:
         subprocess.Popen(["cmd", "/c", str(REPO_ROOT / "START_WATCHEDIT.bat")],
                          cwd=str(REPO_ROOT), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
@@ -185,12 +193,16 @@ def _start_instance() -> bool:
         return False
 
 
-def _smoke_test() -> (bool, str):
+def _smoke_test(repo_root: Path = REPO_ROOT) -> (bool, str):
+    # Repositories without the desktop app (e.g. test mini-repos) have no UI
+    # to boot; the smoke test applies only when the app is present.
+    if not (repo_root / "9router_WatchEdit" / "ui" / "main_window.py").is_file():
+        return True, ""
     code = (
         "import os, sys\n"
         "os.environ['QT_QPA_PLATFORM']='offscreen'\n"
         "os.environ.pop('WATCHEDIT_LIVE_ACCESS', None)\n"
-        "sys.path.insert(0, r'" + str(REPO_ROOT / "9router_WatchEdit") + "')\n"
+        "sys.path.insert(0, r'" + str(repo_root / "9router_WatchEdit") + "')\n"
         "from PySide6.QtWidgets import QApplication\n"
         "app = QApplication([])\n"
         "from ui.main_window import MainWindow\n"
@@ -203,7 +215,7 @@ def _smoke_test() -> (bool, str):
     env["QT_QPA_PLATFORM"] = "offscreen"
     try:
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                           timeout=120, env=env, cwd=str(REPO_ROOT / "9router_WatchEdit"))
+                           timeout=120, env=env, cwd=str(repo_root / "9router_WatchEdit"))
     except subprocess.TimeoutExpired:
         return False, "smoke test timed out"
     if "SMOKE_OK" in r.stdout:

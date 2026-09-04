@@ -22,6 +22,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import datetime
 import getpass
 import io
@@ -60,7 +61,13 @@ def _collect_sources() -> List[Path]:
 def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> Path:
     if not password or len(password) < 8:
         raise ValueError("Master password must be at least 8 characters")
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).resolve()
+    # BACKUP-001: private backups must NEVER be written inside the repository
+    if str(out_dir).startswith(str(REPO_ROOT.resolve()) + os.sep) or out_dir == REPO_ROOT.resolve():
+        raise ValueError(
+            "Private backup destination must be OUTSIDE the repository "
+            f"(refused: {out_dir} is inside {REPO_ROOT})"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sources = _collect_sources()
@@ -108,9 +115,21 @@ def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> 
     return out_path
 
 
+class _NoEchoArgumentParser(argparse.ArgumentParser):
+    """REDACT-006: argparse echoes offending argument VALUES into its usage
+    error. A password passed by mistake must never be printed back."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        sys.stderr.write("error: unrecognized/invalid argument (value redacted)\n")
+        sys.exit(2)
+
+
 def main(argv=None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="Create encrypted PRIVATE backup (outside repository)")
+    ap = _NoEchoArgumentParser(
+        description="Create encrypted PRIVATE backup (outside repository)",
+        allow_abbrev=False)  # REDACT-006: --password must never abbreviate --password-env
     ap.add_argument("--password-env", default=None,
                     help="env var holding the master password (non-interactive use only)")
     args = ap.parse_args(argv)

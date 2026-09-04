@@ -14,6 +14,7 @@ def test_cli_token_generation():
     assert token == token2
 
 @pytest.mark.integration
+@pytest.mark.local_trusted
 def test_local_connection_inspection():
     client = RouterClient()
     # Test reading combos (either from API or SQLite fallback)

@@ -107,12 +107,30 @@ def _walk(node, rng: random.Random, stats: _Stats, depth: int = 0, force: bool =
                         out[k] = json.dumps(cleaned, ensure_ascii=False)
                         continue
                 out[k] = v
+            elif v is None or isinstance(v, (bool, int, float)):
+                # SAN-005: even numeric/boolean values under sensitive keys
+                # are redacted — numbers can encode secrets
+                if force or _sensitive_key_name(k_l):
+                    stats.redacted += 1
+                    out[k] = GENERIC_REDACT
+                else:
+                    out[k] = v
             else:
-                out[k] = _walk(v, rng, stats, depth + 1, force=child_force)
+                # SAN-005: sensitive-typed or non-string values we cannot
+                # transform safely are REDACTED, never copied through.
+                if force or _sensitive_key_name(k_l):
+                    stats.redacted += 1
+                    out[k] = GENERIC_REDACT
+                else:
+                    out[k] = _walk(v, rng, stats, depth + 1, force=child_force)
         return out
     if isinstance(node, list):
         return [_walk(v, rng, stats, depth + 1, force=force) for v in node]
     return node
+
+
+def _sensitive_key_name(k_l: str) -> bool:
+    return k_l in FORCE_REDACT_CONTEXTS or any(w in k_l for w in SENSITIVE_SUBSTRINGS) or k_l in REPLACEMENTS
 
 
 def sanitize_export(src: Path, dst: Path, verify: bool = True) -> int:

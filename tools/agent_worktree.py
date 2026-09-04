@@ -127,7 +127,7 @@ def review_worktree(name: str, repo_root: Path = REPO_ROOT, run_tests: bool = Tr
         print("    (no changes)")
 
     findings = verify_agent_safe(wt)
-    print("  protected-path/secret scan:", "CLEAN" if not findings else "UNSAFE")
+    print("  protected-path/secret scan:", "SECRET CHECK: PASS" if not findings else "SECRET CHECK: FAIL")
     if findings:
         print(format_result(findings))
 

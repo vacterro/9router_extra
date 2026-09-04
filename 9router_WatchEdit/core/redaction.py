@@ -16,14 +16,24 @@ from typing import Any, Dict, List, Optional
 
 REDACTED = "<REDACTED>"
 
-# Case-insensitive sensitive keys (task section 4 minimum list).
-SENSITIVE_KEYS = {
-    "api_key", "apikey", "key", "token", "access_token", "accesstoken",
-    "refresh_token", "refreshtoken", "client_secret", "clientsecret",
-    "authorization", "auth", "cookie", "cookies", "password", "passwd",
-    "pwd", "secret", "jwt", "bearer", "credential", "credentials",
-    "private_key", "apikeyid",
-}
+# Case-insensitive sensitive keys (task section 4 list). A key is sensitive
+# when a credential word sits at the END of the key name (possibly behind
+# [_-] separated prefixes): refreshToken, provided_token, user_api_key match;
+# token_count, tokenizer, secretary, password_field_label do not.
+SENSITIVE_KEY_RE = re.compile(
+    r'(?i)^(?:[a-z0-9]+[_\-])*'
+    r'(api[_-]?key|apikey|key|token|access[_-]?token|accesstoken|'
+    r'refresh[_-]?token|refreshtoken|client[_-]?secret|clientsecret|'
+    r'authorization|auth|cookie|cookies|password|passwd|pwd|secret|'
+    r'jwt|bearer|credential|credentials|private[_-]?key|apikeyid)$'
+)
+
+# Bare high-entropy tokens (>= 32 chars, letters+digits) are redacted even
+# without a sensitive field name: logs must never carry credential-shaped
+# blobs. Composite identifiers (containing '/', '://', ISO timestamps, pure
+# numerics) are preserved — model IDs and URLs survive diagnostics.
+_BENIGN_TEXT_RE = re.compile(r'(?i)(://|/|^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|^\d[\d:\.\-]*$)')
+_HIGH_ENTROPY_TEXT_RE = re.compile(r'\b[A-Za-z0-9_\-]{32,}\b')
 
 # Credential-shaped text patterns.
 _TEXT_PATTERNS = [
@@ -48,6 +58,11 @@ def redact_text(text: str) -> str:
             cleaned = pattern.sub(lambda m: m.group(1) + REDACTED, cleaned)
         else:
             cleaned = pattern.sub(REDACTED, cleaned)
+    # bare high-entropy tokens (REDACT-001: synthetic canaries and real blobs
+    # alike must never survive into logs, even without a recognizable shape)
+    def _red(tok: str) -> str:
+        return tok if _BENIGN_TEXT_RE.search(tok) else REDACTED
+    cleaned = _HIGH_ENTROPY_TEXT_RE.sub(lambda m: _red(m.group(0)), cleaned)
     return cleaned
 
 
@@ -62,10 +77,11 @@ def redact_mapping(obj: Any, _depth: int = 0) -> Any:
     if isinstance(obj, dict):
         out: Dict[str, Any] = {}
         for k, v in obj.items():
-            if str(k).strip().lower() in SENSITIVE_KEYS and isinstance(v, str) and v:
-                out[str(k)] = REDACTED
+            key_str = str(k)
+            if isinstance(v, str) and v and SENSITIVE_KEY_RE.match(key_str):
+                out[key_str] = REDACTED
             else:
-                out[str(k)] = redact_mapping(v, _depth + 1)
+                out[key_str] = redact_mapping(v, _depth + 1)
         return out
     if isinstance(obj, (list, tuple)):
         seq: List[Any] = [redact_mapping(v, _depth + 1) for v in obj]

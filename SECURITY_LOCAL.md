@@ -128,3 +128,41 @@ Private areas (`%LOCALAPPDATA%\9router_WatchEdit\secure`, vault files,
 private/legacy backups) get best-effort user-only ACLs (`icacls …
 /inheritance:r /grant:r <user>:(OI)(CI)F`) at creation time. Encryption
 (DPAPI / vault AEAD) remains the primary control; ACLs are defense in depth.
+
+
+## 10. Adversarial test campaign & fail-closed policy
+
+The security waves are verified by an executable adversarial campaign in
+`9router_WatchEdit/tests/security/` (141 tests, all offline, synthetic canaries
+only — never real credentials). Claim → test mapping: **SECURITY_CLAIMS.md**.
+
+Test layers (run defaults: UNIT + INTEGRATION_SAFE only):
+
+    pytest                                  # default: offline, no live router, no credentials
+    pytest -m integration                   # live local 9Router (explicit)
+    pytest -m local_trusted                 # trusted-runtime interaction (explicit, never implicit)
+    pytest 9router_WatchEdit/tests/security # security campaign
+    RUN_PREMERGE_GATE.cmd                   # full pre-merge pipeline
+
+FAIL-CLOSED INVARIANT: if the scanner cannot inspect something (unreadable
+file, unreadable directory, oversized input, internal error, git failure),
+the result is **NOT SAFE** — "unable to prove safe" always equals "unsafe".
+There is no code path where an internal failure returns a pass.
+
+## 11. Residual threat boundary — read before granting agent access
+
+SAFE REPOSITORY / WORKTREE protects **file sharing** to external agents: the
+tree contains no credentials or private runtime state.
+
+It does **NOT** protect the host from an untrusted agent with arbitrary shell
+execution as the same Windows user. Such an agent can potentially access
+`%LOCALAPPDATA%`, Windows Credential Manager, DPAPI material, authenticated
+localhost services, and other host files. Filesystem separation is not a
+sandbox.
+
+For arbitrary execution by untrusted agents use a **Hyper-V isolated
+development VM** (or a genuinely restricted execution identity). The VM
+receives a fresh clone of this SAFE repository plus developer dependencies and
+sanitized fixtures; it requires NO host credentials. Develop and commit inside
+the VM, export the commit/patch, then review → secret scan → test → merge →
+DEPLOY_LOCAL on the host (see section 12 for the lab recipe).

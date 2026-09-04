@@ -20,15 +20,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "9router_WatchEdit"))
 
-from core.secret_scanner import format_report, scan_file  # noqa: E402
+from core.secret_scanner import Finding, format_report, scan_file  # noqa: E402
 
 
-def _git(args, **kw):
-    return subprocess.run(["git", "-C", str(REPO_ROOT)] + args, capture_output=True, text=True, **kw)
+def _git(args, repo_root=None, **kw):
+    root = str(repo_root) if repo_root else str(REPO_ROOT)
+    return subprocess.run(["git", "-C", root] + args, capture_output=True, text=True, **kw)
 
 
-def check_history() -> int:
-    is_repo = _git(["rev-parse", "--is-inside-work-tree"]).returncode == 0
+def check_history(repo_root: Path = None) -> int:
+    repo_root = Path(repo_root) if repo_root else REPO_ROOT
+    is_repo = _git(["rev-parse", "--is-inside-work-tree"], repo_root).returncode == 0
     if not is_repo:
         print("NO GIT REPOSITORY")
         print("No history to scan. Current worktree can be scanned with tools/secret_scan.py.")
@@ -36,7 +38,7 @@ def check_history() -> int:
         return 0
 
     print("Scanning full commit history for secret patterns ...")
-    listing = _git(["rev-list", "--all"])
+    listing = _git(["rev-list", "--all"], repo_root)
     if listing.returncode != 0:
         print("GIT ERROR: rev-list failed", file=sys.stderr)
         return 2
@@ -44,8 +46,10 @@ def check_history() -> int:
 
     findings = []
     seen_blobs = set()
+    tmp_dir = repo_root / ".git_scan_tmp"
+    tmp_dir.mkdir(exist_ok=True)
     for commit in commits:
-        ls = _git(["ls-tree", "-r", commit])
+        ls = _git(["ls-tree", "-r", commit], repo_root)
         for line in ls.stdout.splitlines():
             parts = line.split()
             if len(parts) < 4:
@@ -54,15 +58,24 @@ def check_history() -> int:
             if otype != "blob" or sha in seen_blobs:
                 continue
             seen_blobs.add(sha)
-            cat = _git(["cat-file", "blob", sha])
+            cat = _git(["cat-file", "blob", sha], repo_root)
             if "\x00" in cat.stdout[:1024]:
                 continue  # binary blob
-            tmp = REPO_ROOT / ".git" / f".scan_{sha[:12]}.tmp"
+            # keep the original suffix so JSON blobs keep structured scanning
+            suffix = Path(path).suffix or ".txt"
+            tmp = tmp_dir / f".scan_{sha[:12]}{suffix}"
             tmp.write_text(cat.stdout, encoding="utf-8", errors="replace")
             try:
-                findings.extend(scan_file(tmp, REPO_ROOT))
+                for f in scan_file(tmp, tmp_dir):
+                    # attribute the finding to the original commit + path
+                    findings.append(Finding(
+                        file=f"{commit[:10]}:{path}",
+                        reason=f.reason, detail=f.detail, fingerprint=f.fingerprint))
             finally:
                 tmp.unlink(missing_ok=True)
+
+    import shutil as _shutil
+    _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if findings:
         print("SECRET MATERIAL EXISTS IN HISTORY")

@@ -9,6 +9,8 @@ survives redaction, the bundle is NOT written.
 """
 from __future__ import annotations
 
+import json
+import os
 import platform
 import sys
 import time
@@ -104,5 +106,8 @@ def export_diagnostic_bundle(
         )
 
     out_path = out_dir / f"diagnostic_bundle_{time.strftime('%Y%m%d_%H%M%S')}.json"
-    out_path.write_text(payload, encoding="utf-8")
+    # EXPORT-004: atomic promotion — no half-built bundle under the final name
+    tmp_out = out_dir / f".diag_{time.strftime('%Y%m%d_%H%M%S')}.partial"
+    tmp_out.write_text(payload, encoding="utf-8")
+    os.replace(tmp_out, out_path)
     return out_path
