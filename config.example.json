@@ -1,0 +1,8 @@
+{
+    "router_base_url": "http://localhost:20128",
+    "secret_backend": "windows",
+    "live_provider_access": false,
+    "trusted_os_unlock": false,
+    "router_credential_ref": "9router/local-api",
+    "_note": "Example configuration with placeholders ONLY. Real local configuration lives at %LOCALAPPDATA%\\9router_WatchEdit\\config\\settings.json and references secrets by ID, never by value."
+}

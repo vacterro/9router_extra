@@ -1,0 +1,42 @@
+# 9router_WatchEdit repository hygiene
+# NOTE: .gitignore is NOT a security boundary. Secrets must physically live
+# outside the repository (see SECURITY_LOCAL.md). These rules only reduce
+# accidents; the pre-commit hook and safe-share scanner provide the gates.
+
+# --- Private / secret-bearing material (must NEVER exist in this repo) ---
+backup/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+jwt-secret
+machine-id
+.env
+.env.*
+*.vault
+credentials.json
+providers-state-export.json
+
+# --- Local runtime state (belongs in %LOCALAPPDATA%\9router_WatchEdit) ---
+health_cache.json
+presets.json
+settings.json
+*.log
+logs/
+
+# --- Engine release artifacts (kept on disk, never committed) ---
+packages/
+patches/
+
+# --- Python / tooling ---
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# --- Agent / editor state ---
+.saipen/
+.idea/
+.vscode/

@@ -1,0 +1,4 @@
+#!/bin/sh
+# 9router_WatchEdit pre-commit secret gate
+# Activate with:  git config core.hooksPath tools/hooks
+python "$(dirname "$0")/../pre_commit_secret_check.py"

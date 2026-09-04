@@ -1,0 +1,34 @@
+{
+  "_description": "Sanitized offline contracts for external-agent development (task section 15). Provider/model names are realistic; every credential-like value is a documented placeholder. Never real.",
+  "providers_sanitized": [
+    {"id": "conn-antigravity", "provider": "antigravity", "name": "Antigravity Free", "isActive": true, "providerSpecificData": {"prefix": "ag"}},
+    {"id": "conn-deepseek", "provider": "deepseek", "name": "DeepSeek Direct", "isActive": true, "providerSpecificData": {"prefix": "ds"}},
+    {"id": "conn-openai", "provider": "openai", "name": "OpenAI Main", "isActive": true, "providerSpecificData": {"prefix": "oai"}},
+    {"id": "conn-broken", "provider": "brokenprov", "name": "Broken Provider", "isActive": true, "providerSpecificData": {"prefix": "brk"}}
+  ],
+  "models_sanitized": [
+    {"canonical_id": "ag/gemini-3.8-flash-high", "provider_prefix": "ag", "model_id": "gemini-3.8-flash-high"},
+    {"canonical_id": "ds/deepseek-v4-flash", "provider_prefix": "ds", "model_id": "deepseek-v4-flash"},
+    {"canonical_id": "oai/gpt-5.6-sol", "provider_prefix": "oai", "model_id": "gpt-5.6-sol"},
+    {"canonical_id": "brk/ghost-model", "provider_prefix": "brk", "model_id": "ghost-model"}
+  ],
+  "combos_sanitized": [
+    {"id": "combo-1", "name": "SAIFREN_FREE", "kind": "llm", "models": ["ag/gemini-3.8-flash-high", "ds/deepseek-v4-flash"]},
+    {"id": "combo-2", "name": "CODING", "kind": "llm", "models": ["ds/deepseek-v4-flash", "oai/gpt-5.6-sol"]}
+  ],
+  "probe_responses_sanitized": {
+    "success": {"status_code": 200, "body": {"ok": true, "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}]}},
+    "auth": {"status_code": 401, "body": {"error": {"code": "invalid_api_key", "message": "Unauthorized"}}},
+    "balance": {"status_code": 402, "body": {"error": {"code": "insufficient_balance", "message": "Insufficient balance"}}},
+    "rate_limit": {"status_code": 429, "body": {"error": {"code": "rate_limit_exceeded", "message": "Too many requests"}}},
+    "timeout": {"status_code": 408, "is_timeout": true, "body": {"error": "Request timed out"}},
+    "model_missing": {"status_code": 404, "body": {"error": {"code": "model_not_found", "message": "The requested model was not found."}}}
+  },
+  "credentials_placeholder": {
+    "_note": "Structural placeholder for tests that need credential-shaped fields.",
+    "apiKey": "<REDACTED_API_KEY>",
+    "accessToken": "fake-access-token",
+    "refreshToken": "fake-refresh-token",
+    "clientSecret": "example-client-secret"
+  }
+}

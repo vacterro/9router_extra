@@ -1,0 +1,9 @@
+#!/bin/sh
+# 9router_WatchEdit pre-push repository safety gate
+# (VERIFY_AGENT_SAFE remains the authoritative gate for direct agent access)
+python "$(dirname "$0")/../verify_agent_safe.py" --quiet || {
+    python "$(dirname "$0")/../verify_agent_safe.py"
+    echo "PUSH BLOCKED: repository tree is not agent-safe."
+    exit 1
+}
+echo "pre-push agent-safety scan: clean"

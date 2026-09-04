@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+deploy_local.py - Trusted local deploy: SOURCE -> validate -> RUNNING APP.
+
+External agents modify SOURCE (repository/worktrees). This tool is run by the
+TRUSTED local user to bring the reviewed code live. The application runs from
+the repository tree, so "deploy code" = validating and activating a reviewed
+git revision; PRIVATE RUNTIME STATE is never touched:
+
+    %LOCALAPPDATA%\\9router_WatchEdit\\  (credentials, vault, cache, backups)
+    %APPDATA%\\9router\\                 (running 9Router engine + its DB)
+
+Pipeline (task section 12):
+ 1. verify repository secret-free      (VERIFY_AGENT_SAFE)
+ 2. verify working tree/revision       (git: clean tree, record revision)
+ 3. run unit tests                     (offline suite)
+ 4. build if required                  (pure Python: no build step)
+ 5. create source rollback point       (git tag predeploy/<ts>)
+ 6. stop/reload service only if needed (--restart; skipped by default)
+ 7. deploy CODE only                   (--source <ref> checkout, optional)
+ 8. preserve private runtime state     (never written; reported)
+ 9. restart/reload                     (only with --restart)
+10. local smoke test                   (offscreen import + locked boot)
+11. report; on failure -> ROLLBACK CODE (private state untouched)
+
+Usage:
+    python tools/deploy_local.py [--source <ref>] [--restart] [--skip-tests]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "9router_WatchEdit"))
+
+# DEPLOY MANIFEST (task section 11): the deployable code surface.
+DEPLOY_MANIFEST = [
+    "9router_WatchEdit/core", "9router_WatchEdit/ui", "9router_WatchEdit/tests",
+    "9router_WatchEdit/tools", "9router_WatchEdit/config.py", "9router_WatchEdit/run.py",
+    "tools", "docs",
+]
+NEVER_DEPLOY_HINTS = ("backup", "secrets", "private", "runtime", "vault", ".sqlite", ".env")
+
+PRIVATE_RUNTIME_ROOT = Path(os.environ.get("WATCHEDIT_DATA_DIR")
+                            or Path(os.environ.get("LOCALAPPDATA", "")) / "9router_WatchEdit")
+
+
+def _git(args: List[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(REPO_ROOT)] + args, capture_output=True, text=True)
+
+
+def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests: bool = False,
+                 quiet: bool = False) -> bool:
+    steps: List[str] = []
+
+    def log(msg: str):
+        if not quiet:
+            print(msg)
+
+    # 1. Secret-free repository
+    from verify_agent_safe import format_result, verify_agent_safe
+    findings = verify_agent_safe(REPO_ROOT)
+    if findings:
+        log(format_result(findings))
+        log("\nDEPLOY ABORTED: repository is not agent-safe.")
+        return False
+    steps.append("1. secret-free verification: OK")
+
+    # 2. Working tree / revision
+    if _git(["rev-parse", "--is-inside-work-tree"]).returncode != 0:
+        log("DEPLOY ABORTED: not a git repository.")
+        return False
+    status = _git(["status", "--porcelain"])
+    if status.stdout.strip():
+        log("DEPLOY ABORTED: working tree not clean. Commit or stash first.")
+        log(status.stdout)
+        return False
+    original_ref = _git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    original_sha = _git(["rev-parse", "HEAD"]).stdout.strip()
+    steps.append(f"2. revision: {original_ref} @ {original_sha[:10]} (clean)")
+
+    # 3. Unit tests
+    if not skip_tests:
+        tr = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header"],
+                            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900)
+        if tr.returncode != 0:
+            log((tr.stdout or tr.stderr).strip().splitlines()[-1] if tr.stdout else "tests failed")
+            log("DEPLOY ABORTED: unit tests failed.")
+            return False
+        tail = (tr.stdout or "").strip().splitlines()[-1]
+        steps.append(f"3. unit tests: OK ({tail})")
+    else:
+        steps.append("3. unit tests: SKIPPED (explicit flag)")
+
+    # 4. Build (pure Python application: no build step)
+    steps.append("4. build: not required (pure Python source deployment)")
+
+    # 5. Rollback point
+    tag = f"predeploy/{time.strftime('%Y%m%d_%H%M%S')}"
+    _git(["tag", "-f", tag, original_sha])
+    steps.append(f"5. rollback point: git tag {tag}")
+
+    deployed = False
+    try:
+        # 6. Stop running instance only when required
+        if restart:
+            stopped = _stop_running_instance()
+            steps.append(f"6. running instance: {'stopped' if stopped else 'none found'}")
+        else:
+            steps.append("6. running instance: left as-is (no --restart)")
+
+        # 7. Deploy CODE only
+        if source:
+            res = _git(["checkout", source])
+            if res.returncode != 0:
+                log(f"DEPLOY FAILED at checkout of {source}: {res.stderr.strip()}")
+                raise RuntimeError("checkout failed")
+            steps.append(f"7. code deployed: checked out {source}")
+        else:
+            steps.append(f"7. code deployed: {original_ref} @ {original_sha[:10]} (already active)")
+
+        # 8. Private runtime state preserved (never written by deploy)
+        steps.append(f"8. private runtime preserved: {PRIVATE_RUNTIME_ROOT} (untouched)")
+
+        # 9. Restart / reload
+        if restart:
+            launched = _start_instance()
+            steps.append(f"9. app restart: {'launched' if launched else 'launch FAILED'}")
+            if not launched:
+                raise RuntimeError("restart failed")
+        else:
+            steps.append("9. app restart: skipped (no --restart)")
+
+        # 10. Local smoke test
+        ok, detail = _smoke_test()
+        steps.append(f"10. smoke test: {'OK' if ok else detail}")
+        if not ok:
+            raise RuntimeError(f"smoke test failed: {detail}")
+
+        deployed = True
+    except RuntimeError as ex:
+        # 12. Rollback code; private state remains untouched
+        _git(["checkout", "-f", original_ref])
+        _git(["checkout", original_ref])
+        log(f"ROLLBACK CODE -> {original_ref} @ {original_sha[:10]} ({ex})")
+        log("Private runtime state was not touched.")
+        deployed = False
+    finally:
+        # 11. Report
+        log("")
+        log("DEPLOY LOCAL REPORT")
+        for s in steps:
+            log("  " + s)
+        log(f"  result: {'SUCCESS' if deployed else 'FAILED (rolled back)'}")
+    return deployed
+
+
+def _stop_running_instance() -> bool:
+    """Stops WatchEdit instances launched from THIS repository (pythonw run.py)."""
+    try:
+        listing = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'run\\.py' -and $_.CommandLine -match '9router_WatchEdit' } | Select-Object -ExpandProperty ProcessId"],
+            capture_output=True, text=True, timeout=30)
+        pids = [p.strip() for p in listing.stdout.split() if p.strip().isdigit()]
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
+        return bool(pids)
+    except Exception:
+        return False
+
+
+def _start_instance() -> bool:
+    try:
+        subprocess.Popen(["cmd", "/c", str(REPO_ROOT / "START_WATCHEDIT.bat")],
+                         cwd=str(REPO_ROOT), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        return True
+    except Exception:
+        return False
+
+
+def _smoke_test() -> (bool, str):
+    code = (
+        "import os, sys\n"
+        "os.environ['QT_QPA_PLATFORM']='offscreen'\n"
+        "os.environ.pop('WATCHEDIT_LIVE_ACCESS', None)\n"
+        "sys.path.insert(0, r'" + str(REPO_ROOT / "9router_WatchEdit") + "')\n"
+        "from PySide6.QtWidgets import QApplication\n"
+        "app = QApplication([])\n"
+        "from ui.main_window import MainWindow\n"
+        "w = MainWindow()\n"
+        "assert w.security.state == 'LOCKED' or w.security.is_live_allowed()\n"
+        "w.close()\n"
+        "print('SMOKE_OK')\n"
+    )
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           timeout=120, env=env, cwd=str(REPO_ROOT / "9router_WatchEdit"))
+    except subprocess.TimeoutExpired:
+        return False, "smoke test timed out"
+    if "SMOKE_OK" in r.stdout:
+        return True, ""
+    return False, (r.stderr or r.stdout).strip()[-300:]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Trusted local deploy (code only, private state preserved)")
+    ap.add_argument("--source", default=None, help="git ref to deploy (default: current HEAD)")
+    ap.add_argument("--restart", action="store_true", help="stop and relaunch the running app")
+    ap.add_argument("--skip-tests", action="store_true")
+    args = ap.parse_args(argv)
+    return 0 if deploy_local(source=args.source, restart=args.restart, skip_tests=args.skip_tests) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

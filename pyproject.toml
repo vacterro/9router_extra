@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "9router-watchedit"
+version = "1.0.0"
+description = "Real-time provider/model health scanner & combo editor control plane for local 9Router installations"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+vault = [
+    "cryptography>=42.0.0",
+    "argon2-cffi>=23.0.0",
+]
+
+[project.scripts]
+9router-watchedit = "9router_WatchEdit.run:main"
+
+[tool.pytest.ini_options]
+testpaths = ["9router_WatchEdit/tests"]
+python_files = ["test_*.py"]
+pythonpath = ["9router_WatchEdit"]
+addopts = "-m \"not integration\""
+markers = [
+    "integration: marks tests requiring live local 9router environment (run with 'pytest -m integration'; excluded from the default suite)",
+]
