@@ -52,7 +52,12 @@ class SecurityManager:
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir) if data_dir else SECURE_DIR
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # GATE 19: unavailable private storage degrades to LOCKED, never crashes
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.storage_available = True
+        except OSError:
+            self.storage_available = False
         self._grant_path = self.data_dir / GRANT_FILE
         self._vault_path = self.data_dir / VAULT_FILE
         self._state = LOCKED

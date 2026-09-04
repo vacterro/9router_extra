@@ -92,3 +92,26 @@ Run: `pytest 9router_WatchEdit/tests/security -q` (offline, synthetic canaries o
 - `icacls` tests (WIN-005/006) skip if the ACL tool is unavailable.
 - Hyper-V agent lab (section 34): documented in SECURITY_LOCAL.md, not CI —
   the VM exercise is a manual strong-isolation demonstration.
+
+
+## Torture gate (final lock-in)
+
+Cross-layer verification under simultaneous failure conditions, all executable in
+`tests/security/test_torture_gates*.py` (49 tests): zero-trust checkout cycle
+(G1), simultaneous hostile pollution with complete violation sets and scanner
+recovery (G2), hostile-then-legitimate agent contributions (G3), stale-base +
+real-conflict merges (G4), private-runtime hash immutability across the full
+workflow (G5), deploy crash matrix D1–D10 with terminal-state vocabulary incl.
+RECOVERY_REQUIRED (G6), abandoned-deploy transactional-marker recovery and
+stale staging/partial cleanup (G7), redaction torture across every channel with
+prefix/suffix fragment policy (G8/G9), useful-but-sanitized diagnostics from
+dirty realistic state (G10), approved history remediation (G11), nested-repo
+content scanning (G12), archive-bomb boundedness (G13), network independence
+(G14), localhost trust boundary in LOCKED mode (G15), environment-variable
+leak guard (G16), crash-report redaction (G17), permission attacks with no repo
+fallback (G18), private-storage-unavailable degradation to SECRETS LOCKED
+(G19), source-rollback ≠ private-restore (G20), migration N/A evidence (G21),
+config-injection merge gate (G22), case-normalized path authorization (G23),
+rename race (G24), secret-free tests (G25), false-success attacks (G26),
+receipt truthfulness (G27), 50-iteration workflow soak (G28), parallel agent
+soak with mixed outcomes (G29), master canary search across all surfaces (G30).

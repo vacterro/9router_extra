@@ -30,6 +30,8 @@ def make_mini_repo(tmp_path: Path, name: str = "gitrepo") -> Path:
     repo = tmp_path / name
     repo.mkdir(parents=True)
     (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "__pycache__/\n*.pyc\n.pytest_cache/\n", encoding="utf-8")
     (repo / "tests").mkdir()
     (repo / "tests" / "test_ok.py").write_text(
         "def test_ok():\n    assert 1 + 1 == 2\n", encoding="utf-8")

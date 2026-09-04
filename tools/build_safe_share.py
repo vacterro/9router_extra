@@ -131,6 +131,10 @@ def build_safe_share(out_dir: Path = None, skip_gitleaks: bool = False, quiet: b
     out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
     candidates = collect_candidates()
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # GATE 7: sweep stale partial artifacts from interrupted runs
+    for stale in out_dir.glob(".SAFE_*.partial.zip"):
+        stale.unlink(missing_ok=True)
     staging = out_dir / ".staging"
     if staging.exists():
         shutil.rmtree(staging)

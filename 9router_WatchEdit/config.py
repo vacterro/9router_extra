@@ -14,13 +14,23 @@ CLI_SECRET_FILE = APPDATA_ROUTER / "auth" / "cli-secret"
 # Local WatchEdit Data Directory (LOCAL SECRET / RUNTIME LAYER — always OUTSIDE the repository).
 # WATCHEDIT_DATA_DIR override exists for hermetic tests and portable installs.
 LOCALAPPDATA_DIR = Path(os.environ.get("WATCHEDIT_DATA_DIR") or (Path(os.environ.get("LOCALAPPDATA", "")) / "9router_WatchEdit"))
-LOCALAPPDATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def _ensure_dir(p: Path) -> bool:
+    """Best-effort creation. GATE 19: an unavailable private root must degrade
+    to PRIVATE STORAGE UNAVAILABLE / SECRETS LOCKED — never crash at import
+    and NEVER fall back to writing private state inside the repository."""
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return p.is_dir()
+    except OSError:
+        return False
+
+PRIVATE_STORAGE_AVAILABLE = _ensure_dir(LOCALAPPDATA_DIR)
 
 HEALTH_CACHE_FILE = LOCALAPPDATA_DIR / "health_cache.json"
 PRESETS_FILE = LOCALAPPDATA_DIR / "presets.json"
 SETTINGS_FILE = LOCALAPPDATA_DIR / "settings.json"
 BACKUP_DIR = LOCALAPPDATA_DIR / "db_backups"
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 # Secret isolation layout (task: SECRET ISOLATION + SAFE EXTERNAL DEVELOPMENT MODE)
 CONFIG_DIR = LOCALAPPDATA_DIR / "config"
@@ -28,8 +38,9 @@ SECURE_DIR = LOCALAPPDATA_DIR / "secure"
 PRIVATE_BACKUP_DIR = LOCALAPPDATA_DIR / "backups" / "private"
 LEGACY_BACKUP_ROOT = LOCALAPPDATA_DIR / "backups"
 DIAGNOSTICS_DIR = LOCALAPPDATA_DIR / "runtime" / "diagnostics"
-for _d in (CONFIG_DIR, SECURE_DIR, PRIVATE_BACKUP_DIR, DIAGNOSTICS_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+if PRIVATE_STORAGE_AVAILABLE:
+    for _d in (BACKUP_DIR, CONFIG_DIR, SECURE_DIR, PRIVATE_BACKUP_DIR, DIAGNOSTICS_DIR):
+        _ensure_dir(_d)
 
 # Local (machine-private) settings file for the security layer
 LOCAL_SETTINGS_FILE = CONFIG_DIR / "settings.json"

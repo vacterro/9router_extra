@@ -21,6 +21,7 @@ review:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -92,6 +93,21 @@ def _find_worktree(name: str, repo_root: Path) -> Optional[Path]:
     return None
 
 
+def _config_injection_in_diff(wt: Path, main_branch: str) -> List[str]:
+    """GATE 22: an agent diff must not redirect private runtime into the
+    repository (private_root = repo/private, '..'-relative roots, etc.)."""
+    diff = _git(["diff", f"{main_branch}...HEAD"], wt)
+    offenders = []
+    forbidden = re.compile(
+        r'(?i)^\+.*(?:private[_-]?root|runtime[_-]?root|data[_-]?dir|localappdata_dir)\s*[:=]\s*'
+        r'(?:path\(|os\.path\.join\()?'
+        r'(?:["\']?\.\.?["\']?|["\']?(?:\./)?(?:private|runtime|backup|secrets|repo)["\']?)',
+        re.MULTILINE)
+    for m in forbidden.finditer(diff.stdout or ""):
+        offenders.append(f"diff line redirects private runtime into repository: +{m.group(0).strip()[:80]}")
+    return offenders
+
+
 def review_worktree(name: str, repo_root: Path = REPO_ROOT, run_tests: bool = True) -> int:
     from verify_agent_safe import format_result, verify_agent_safe
     _require_git(repo_root)
@@ -127,9 +143,13 @@ def review_worktree(name: str, repo_root: Path = REPO_ROOT, run_tests: bool = Tr
         print("    (no changes)")
 
     findings = verify_agent_safe(wt)
+    injection = _config_injection_in_diff(wt, main_branch)
     print("  protected-path/secret scan:", "SECRET CHECK: PASS" if not findings else "SECRET CHECK: FAIL")
     if findings:
         print(format_result(findings))
+    print("  config-injection gate:", "PASS" if not injection else "FAIL")
+    for line in injection:
+        print(f"    {line}")
 
     if run_tests:
         print("  unit tests:")
@@ -141,10 +161,11 @@ def review_worktree(name: str, repo_root: Path = REPO_ROOT, run_tests: bool = Tr
     else:
         tests_ok = True
 
-    blocked = bool(findings)
+    blocked = bool(findings) or bool(injection)
     print()
     if blocked:
-        print("MERGE BLOCKED: worktree contains protected/secret material.")
+        print("MERGE BLOCKED: worktree contains protected/secret material "
+              "or unsafe configuration redirection.")
         return 1
     if not tests_ok:
         print("MERGE BLOCKED: unit tests failed in worktree.")

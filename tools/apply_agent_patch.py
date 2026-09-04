@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -86,9 +87,10 @@ def authorize_target(raw_target: str, repo_root: Path) -> Path:
         raise PatchRejected(f"absolute/UNC/drive path rejected: {raw_target!r}")
 
     resolved = (repo_root / t).resolve()
-    try:
-        resolved.relative_to(repo_root.resolve())
-    except ValueError:
+    # GATE 23: canonical, case-normalized containment (no naive prefix checks)
+    resolved_nc = os.path.normcase(str(resolved))
+    root_nc = os.path.normcase(str(repo_root.resolve()))
+    if not (resolved_nc == root_nc or resolved_nc.startswith(root_nc + os.sep)):
         raise PatchRejected(f"path escapes repository root: {raw_target!r}")
 
     if ".git" in resolved.parts:

@@ -117,8 +117,13 @@ def main(argv=None) -> int:
     ok = True
     for name, fn in steps:
         print(f"  {name}")
-        if not fn():
-            print(f"    FAILED")
+        try:
+            if not fn():
+                print("    FAILED")
+                ok = False
+                break
+        except Exception as ex:  # GATE 26: exception != clean result
+            print(f"    FAILED (validator raised {type(ex).__name__}; fail closed)")
             ok = False
             break
     print()

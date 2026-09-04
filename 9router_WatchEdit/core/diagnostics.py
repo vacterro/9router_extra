@@ -90,10 +90,16 @@ def export_diagnostic_bundle(
     payload = json.dumps(data, indent=2, ensure_ascii=False)
 
     # Gate: scan the payload text before it is ever written to disk.
+    # GATE 26: scanner exceptions abort the export (fail closed).
     tmp_scan = out_dir / ".pending_diag_scan.txt"
     try:
         tmp_scan.write_text(payload, encoding="utf-8")
-        findings: List[Finding] = scan_tree(out_dir, include=[tmp_scan])
+        try:
+            findings: List[Finding] = scan_tree(out_dir, include=[tmp_scan])
+        except Exception as ex:
+            raise RuntimeError(
+                f"SAFE EXPORT BLOCKED: diagnostic scanner raised {type(ex).__name__} "
+                "(failed closed); bundle not written.")
     finally:
         if tmp_scan.exists():
             tmp_scan.unlink()

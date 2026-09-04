@@ -145,8 +145,8 @@ class TestNoRepoRelativePrivateFallback:
         )
         offenders = []
         for p in (REPO_ROOT / "9router_WatchEdit").rglob("*.py"):
-            if "__pycache__" in p.parts or not p.is_file():
-                continue
+            if "__pycache__" in p.parts or "tests" in p.parts or not p.is_file():
+                continue  # production sources only; test fixtures may quote hostile patterns
             text = p.read_text(encoding="utf-8", errors="replace")
             for m in forbidden.finditer(text):
                 offenders.append(f"{p.relative_to(REPO_ROOT)}: ...{text[max(0, m.start()-30):m.end()+30]}...")
