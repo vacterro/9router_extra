@@ -16,10 +16,10 @@ def test_discovery_synthetic_mock():
         {"id": "openai-compatible-chat-node-1", "name": "AMD", "prefix": "amd", "data": {"prefix": "amd"}},
         {"id": "openai-compatible-chat-node-2", "name": "NVIDIA NIM", "prefix": "nim", "data": {"prefix": "nim"}},
     ]
-    mock_client.get_kv.return_value = [
-        ("openai-compatible-chat-node-1|DeepSeek-V4-Flash|llm", "{}"),
-        ("openai-compatible-chat-node-2|nim/minimaxai/minimax-m3|llm", "{}"),
-        ("openai-compatible-chat-node-2|01-ai/yi-large|llm", "{}"),
+    mock_client.get_kv_scoped.return_value = [
+        ("customModels", "openai-compatible-chat-node-1|DeepSeek-V4-Flash|llm", "{}"),
+        ("customModels", "openai-compatible-chat-node-2|nim/minimaxai/minimax-m3|llm", "{}"),
+        ("customModels", "openai-compatible-chat-node-2|01-ai/yi-large|llm", "{}"),
     ]
     mock_client.get_catalog_models.return_value = [
         {"provider": "deepseek", "model": "deepseek-chat", "name": "DeepSeek Chat", "routedModel": "deepseek/deepseek-chat"},

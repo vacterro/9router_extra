@@ -14,8 +14,10 @@ machine-id
 .env
 .env.*
 *.vault
+*.partial
 credentials.json
 providers-state-export.json
+*.dpapi
 
 # --- Local runtime state (belongs in %LOCALAPPDATA%\9router_WatchEdit) ---
 health_cache.json
@@ -36,7 +38,12 @@ dist/
 build/
 *.egg-info/
 
-# --- Agent / editor state ---
-.saipen/
+# --- Agent / editor state (IDENTITY.md is the portable lineage carrier and
+#      must stay tracked; everything else under .saipen/ is local state) ---
+.saipen/*
+!.saipen/IDENTITY.md
 .idea/
 .vscode/
+
+# --- Live provider/runtime caches (fetched data, never source) ---
+.freebuff/

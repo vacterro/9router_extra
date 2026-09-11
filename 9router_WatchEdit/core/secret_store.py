@@ -182,32 +182,42 @@ class DPAPIFileStore:
 
     def __init__(self, secure_dir: Path = SECURE_DIR):
         self.secure_dir = Path(secure_dir)
-        self.secure_dir.mkdir(parents=True, exist_ok=True)
-        restrict_to_current_user(self.secure_dir)
+        # CORE-001: no private storage -> keep the (unavailable) path for
+        # reporting but never create/allocate a CWD-relative secure directory.
+        if not self.secure_dir.is_absolute():
+            return
+        try:
+            self.secure_dir.mkdir(parents=True, exist_ok=True)
+            restrict_to_current_user(self.secure_dir)
+        except OSError:
+            pass
 
     def _path(self, name: str) -> Path:
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "-_")
         return self.secure_dir / f"{safe}.dpapi"
 
     def set_secret(self, name: str, value: str) -> None:
+        if not self.secure_dir.is_absolute():
+            raise PermissionError("Private storage unavailable; cannot store secrets")
         blob = dpapi_protect(value.encode("utf-8"))
         self._path(name).write_bytes(blob)
 
     def get_secret(self, name: str) -> Optional[str]:
         p = self._path(name)
-        if not p.exists():
+        if not p.is_absolute() or not p.exists():
             return None
         return dpapi_unprotect(p.read_bytes()).decode("utf-8", "replace")
 
     def delete_secret(self, name: str) -> bool:
         p = self._path(name)
-        if p.exists():
+        if p.is_absolute() and p.exists():
             p.unlink()
             return True
         return False
 
     def has_secret(self, name: str) -> bool:
-        return self._path(name).exists()
+        p = self._path(name)
+        return p.is_absolute() and p.exists()
 
 
 # ---------------------------------------------------------------------------

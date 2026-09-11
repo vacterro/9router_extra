@@ -1,0 +1,10 @@
+{
+  "object": "list",
+  "data": [
+    {"id": "deepseek-v4-flash"},
+    {"id": "deepseek-v4-flash-free"},
+    {"id": "opencode-lite"},
+    {"id": "opencode-lite-free"},
+    {"id": "claude-haiku-5-free"}
+  ]
+}

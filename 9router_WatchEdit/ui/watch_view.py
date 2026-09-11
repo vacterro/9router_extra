@@ -49,12 +49,12 @@ class WatchView(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(3)
 
         # 1. Action Toolbar
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(4)
 
         self.btn_quick_scan = QPushButton("QUICK SCAN")
         self.btn_quick_scan.setObjectName("primaryAction")
@@ -97,8 +97,9 @@ class WatchView(QWidget):
         ]
 
         for state_val, label in pill_defs:
-            btn = QPushButton(f"[{label}]")
-            btn.setFixedHeight(20)
+            btn = QPushButton(label)
+            btn.setFixedHeight(18)
+            btn.setFont(get_app_font(10))
             btn.clicked.connect(lambda checked=False, s=state_val: self._on_filter_pill_clicked(s))
             pills_layout.addWidget(btn)
             self.filter_buttons[state_val] = btn
@@ -107,8 +108,8 @@ class WatchView(QWidget):
 
         # Search box
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Search provider, model, latency, reason...")
-        self.txt_search.setFixedWidth(240)
+        self.txt_search.setPlaceholderText("Search...")
+        self.txt_search.setMaximumWidth(200)
         self.txt_search.textChanged.connect(self._apply_filter)
         pills_layout.addWidget(self.txt_search)
 
@@ -198,13 +199,13 @@ class WatchView(QWidget):
             else:
                 counts["ATTENTION"] += 1
 
-        self.filter_buttons[None].setText(f"[ALL ({total})]")
-        self.filter_buttons["USE"].setText(f"[USE ({counts['USE']})]")
-        self.filter_buttons["FREE"].setText(f"[FREE ({counts['FREE']})]")
-        self.filter_buttons["PAID"].setText(f"[PAID ({counts['PAID']})]")
-        self.filter_buttons["ATTENTION"].setText(f"[ATTENTION ({counts['ATTENTION']})]")
-        self.filter_buttons["PENDING"].setText(f"[PENDING ({counts['PENDING']})]")
-        self.filter_buttons["DEAD"].setText(f"[DEAD ({counts['DEAD']})]")
+        self.filter_buttons[None].setText(f"ALL ({total})")
+        self.filter_buttons["USE"].setText(f"USE ({counts['USE']})")
+        self.filter_buttons["FREE"].setText(f"FREE ({counts['FREE']})")
+        self.filter_buttons["PAID"].setText(f"PAID ({counts['PAID']})")
+        self.filter_buttons["ATTENTION"].setText(f"ATT ({counts['ATTENTION']})")
+        self.filter_buttons["PENDING"].setText(f"PEND ({counts['PENDING']})")
+        self.filter_buttons["DEAD"].setText(f"DEAD ({counts['DEAD']})")
 
     def refresh_table(self):
         self.table.setSortingEnabled(False)

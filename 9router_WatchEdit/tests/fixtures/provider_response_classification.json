@@ -1,0 +1,73 @@
+{
+  "live_completion": {
+    "status": 200,
+    "body": "{\"choices\":[{\"message\":{\"content\":\"JDW_OK\"}}]}"
+  },
+  "models_empty": {
+    "status": 200,
+    "body": "{\"data\":[],\"object\":\"list\",\"success\":true}",
+    "headers": {"content-type": "application/json; charset=utf-8"}
+  },
+  "models_available": {
+    "status": 200,
+    "body": "{\"data\":[{\"id\":\"current-model\",\"object\":\"model\"}],\"object\":\"list\"}",
+    "headers": {"content-type": "application/json; charset=utf-8"}
+  },
+  "auth_rejected": {
+    "status": 401,
+    "body": "{\"error\":{\"message\":\"Invalid API key\"}}"
+  },
+  "access_forbidden": {
+    "status": 403,
+    "body": "{\"error\":{\"message\":\"Access forbidden\"}}",
+    "headers": {"content-type": "application/json"}
+  },
+  "waf_blocked": {
+    "status": 403,
+    "body": "<!DOCTYPE html><!--[if lt IE 7]><html><title>Attention Required! | Cloudflare</title><p>You have been blocked</p>",
+    "headers": {
+      "content-type": "text/html; charset=UTF-8",
+      "server": "cloudflare",
+      "cf-ray": "fixture-ray"
+    }
+  },
+  "endpoint_or_model_invalid": {
+    "status": 404,
+    "body": "{\"error\":{\"code\":\"model_not_found\",\"message\":\"The requested model was not found\"}}"
+  },
+  "model_gone": {
+    "status": 410,
+    "body": "{\"error\":{\"code\":\"model_gone\",\"message\":\"This model has been removed\"}}"
+  },
+  "router_degraded": {
+    "status": 410,
+    "body": "{\"error\":{\"message\":\"Route retired\"}}"
+  },
+  "rate_limited": {
+    "status": 429,
+    "body": "{\"error\":{\"message\":\"Too many requests\"}}"
+  },
+  "balance_required": {
+    "status": 402,
+    "body": "{\"error\":{\"message\":\"Insufficient balance\"}}"
+  },
+  "provider_error": {
+    "status": 502,
+    "body": "{\"error\":{\"message\":\"Bad gateway\"}}"
+  },
+  "dns_failure": {
+    "status": 503,
+    "body": "Network transport error: getaddrinfo ENOTFOUND api.example.invalid",
+    "parsed": {"error": {"code": "network_error", "message": "getaddrinfo ENOTFOUND api.example.invalid"}}
+  },
+  "connect_timeout": {
+    "status": 0,
+    "body": "",
+    "timeout": true
+  },
+  "non_api_html": {
+    "status": 200,
+    "body": "<html><body>frontend page</body></html>",
+    "headers": {"content-type": "text/html; charset=utf-8"}
+  }
+}

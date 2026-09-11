@@ -5,27 +5,102 @@ import os
 import re
 from pathlib import Path
 
-# Base Paths
-APPDATA_ROUTER = Path(os.environ.get("APPDATA", "")) / "9router"
+# Source tree root: private runtime state must ALWAYS stay outside this tree
+# (audit SRC-001:R0001 / CORE-001). config.py lives at <root>/9router_WatchEdit/.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Unavailable sentinel: os.devnull cannot host a directory tree. Every derived
+# path under it is relative-looking, fails .mkdir()/.write_text() with OSError,
+# and reports .exists() == False, so read-only consumers degrade cleanly.
+_UNAVAILABLE_ROOT = Path(os.devnull)
+
+
+def _is_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_appdata_router() -> Path:
+    """9Router machine/db root. Fail-closed (CORE-001): without a usable APPDATA
+    there is NO router path -- never a CWD-relative one."""
+    raw = os.environ.get("APPDATA", "")
+    if raw:
+        p = Path(raw).expanduser()
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return _UNAVAILABLE_ROOT / "9router"
+        if p.is_absolute() and not _is_inside(resolved, REPO_ROOT):
+            return p / "9router"
+    return _UNAVAILABLE_ROOT / "9router"
+
+
+def _resolve_private_root():
+    """Local WatchEdit private root.
+
+    WATCHEDIT_DATA_DIR (hermetic tests / portable installs) is honoured ONLY as
+    an absolute path that resolves OUTSIDE the repository; a relative override
+    is CWD-dependent by definition and is rejected. Missing LOCALAPPDATA means
+    private storage is UNAVAILABLE -- never CWD-relative (CORE-001).
+    Returns None when no valid private root exists.
+    """
+    raw = os.environ.get("WATCHEDIT_DATA_DIR")
+    if raw:
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            return None
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return None
+        if _is_inside(resolved, REPO_ROOT):
+            return None
+        return p
+    raw = os.environ.get("LOCALAPPDATA", "")
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            try:
+                resolved = p.resolve()
+            except OSError:
+                return None
+            if not _is_inside(resolved, REPO_ROOT):
+                return p / "9router_WatchEdit"
+    return None
+
+# Base Paths (read-only consumers: RouterClient degrades via .exists() checks)
+APPDATA_ROUTER = _resolve_appdata_router()
 ROUTER_DB_PATH = APPDATA_ROUTER / "db" / "data.sqlite"
 MACHINE_ID_FILE = APPDATA_ROUTER / "machine-id"
 CLI_SECRET_FILE = APPDATA_ROUTER / "auth" / "cli-secret"
 
-# Local WatchEdit Data Directory (LOCAL SECRET / RUNTIME LAYER — always OUTSIDE the repository).
-# WATCHEDIT_DATA_DIR override exists for hermetic tests and portable installs.
-LOCALAPPDATA_DIR = Path(os.environ.get("WATCHEDIT_DATA_DIR") or (Path(os.environ.get("LOCALAPPDATA", "")) / "9router_WatchEdit"))
 
 def _ensure_dir(p: Path) -> bool:
-    """Best-effort creation. GATE 19: an unavailable private root must degrade
-    to PRIVATE STORAGE UNAVAILABLE / SECRETS LOCKED — never crash at import
-    and NEVER fall back to writing private state inside the repository."""
+    """Best-effort creation. GATE 19 + CORE-001: an unusable private root must
+    degrade to PRIVATE STORAGE UNAVAILABLE / SECRETS LOCKED — never crash at import
+    and NEVER fall back to writing private state inside the repository (or anywhere
+    CWD-relative)."""
+    if p is None or not p.is_absolute():
+        return False
     try:
+        if _is_inside(p.resolve(), REPO_ROOT):
+            return False
         p.mkdir(parents=True, exist_ok=True)
         return p.is_dir()
     except OSError:
         return False
 
-PRIVATE_STORAGE_AVAILABLE = _ensure_dir(LOCALAPPDATA_DIR)
+
+# Local WatchEdit Data Directory (LOCAL SECRET / RUNTIME LAYER — always OUTSIDE the repository).
+_private_root = _resolve_private_root()
+# PRIVATE_STORAGE_AVAILABLE means the root was resolved to a usable directory
+# (absolute, outside the repo, creatable/existing) — not merely "a path was chosen".
+PRIVATE_STORAGE_CREATED = _ensure_dir(_private_root)
+PRIVATE_STORAGE_AVAILABLE = PRIVATE_STORAGE_CREATED
+LOCALAPPDATA_DIR = _private_root if PRIVATE_STORAGE_AVAILABLE else _UNAVAILABLE_ROOT
 
 HEALTH_CACHE_FILE = LOCALAPPDATA_DIR / "health_cache.json"
 PRESETS_FILE = LOCALAPPDATA_DIR / "presets.json"
@@ -74,6 +149,7 @@ REDACT_PATTERNS = [
     re.compile(r'(?i)(bearer\s+)[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE),
     re.compile(r'sk-[a-zA-Z0-9_\-\.]{12,}'),
     re.compile(r'9r-[a-zA-Z0-9_\-\.]{8,}'),
+    re.compile(r'(?i)kira_[a-zA-Z0-9_\-\.]{8,}'),
 ]
 
 def redact_secrets(text: str) -> str:

@@ -63,8 +63,26 @@ STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED_NO_MUTATION = "FAILED_NO_MUTATION"
 STATUS_FAILED_ROLLED_BACK = "FAILED_ROLLED_BACK"
 STATUS_RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+STATUS_RECOVERED = "RECOVERED"
+
+# W2-002: recovery outcome vocabulary. NONE = nothing to recover;
+# RECOVERED = original revision restored (deploy stops, re-run required);
+# RECOVERY_REQUIRED = marker exists but automatic checkout failed — the
+# original marker is preserved byte-for-byte and the deploy ABORTS.
+RECOVERY_NONE = "NONE"
+RECOVERY_RECOVERED = "RECOVERED"
+RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 
 _last_status = STATUS_FAILED_NO_MUTATION
+
+
+class DeployRecoveryRequired(RuntimeError):
+    """Raised when an unresolved deploy marker cannot be auto-recovered.
+
+    W2-002: the caller must ABORT before any validation, tag creation,
+    marker rewrite, checkout, restart or smoke test, and must never overwrite
+    the only transactional evidence of the interrupted deploy."""
+    pass
 
 
 def last_status() -> str:
@@ -76,13 +94,18 @@ def _marker_path(repo_root: Path) -> Path:
     return repo_root / ".git" / "watchedit_deploy_marker.json"
 
 
-def _recover_abandoned_deploy(repo_root: Path, log) -> bool:
-    """GATE 7: detect a hard-interrupted deploy via its transactional marker
-    and recover deterministically (checkout the recorded original ref).
-    Never mistake an incomplete operation for a completed one."""
+def _recover_abandoned_deploy(repo_root: Path, log) -> str:
+    """GATE 7 + W2-002: detect a hard-interrupted deploy via its transactional
+    marker and recover deterministically (checkout the recorded original ref).
+
+    Returns RECOVERY_NONE / RECOVERY_RECOVERED / RECOVERY_REQUIRED.
+    Never mistake an incomplete operation for a completed one: the boolean
+    return of the legacy API could not distinguish "nothing to recover" from
+    "recovery failed", which let a failed recovery fall through to SUCCESS and
+    overwrite the original marker."""
     marker = _marker_path(repo_root)
     if not marker.exists():
-        return False
+        return RECOVERY_NONE
     try:
         info = json.loads(marker.read_text(encoding="utf-8"))
     except Exception:
@@ -90,7 +113,7 @@ def _recover_abandoned_deploy(repo_root: Path, log) -> bool:
     state = info.get("state", "UNKNOWN")
     if state in ("COMPLETED", "ROLLED_BACK"):
         marker.unlink(missing_ok=True)
-        return False
+        return RECOVERY_NONE
     original_ref = info.get("original_ref", "")
     log(f"ABANDONED DEPLOY DETECTED (state={state}, started={info.get('started', '?')})")
     if original_ref:
@@ -99,9 +122,9 @@ def _recover_abandoned_deploy(repo_root: Path, log) -> bool:
         if res.returncode == 0:
             log(f"Recovered: checked out {original_ref}. Re-run deploy to retry.")
             marker.unlink(missing_ok=True)
-            return True
+            return RECOVERY_RECOVERED
     log("RECOVERY_REQUIRED: could not restore recorded original revision automatically.")
-    return False
+    return RECOVERY_REQUIRED
 
 
 def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests: bool = False,
@@ -121,8 +144,20 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         log(f"result: {status}")
         return deployed
 
-    # 0. Recover any hard-interrupted previous deploy (GATE 7)
-    _recover_abandoned_deploy(repo_root, log)
+    # 0. Recover any hard-interrupted previous deploy (GATE 7 + W2-002)
+    recovery = _recover_abandoned_deploy(repo_root, log)
+    if recovery == RECOVERY_REQUIRED:
+        # Preserve the original marker byte-for-byte; abort before validation,
+        # tag creation, marker rewrite, checkout, restart or smoke test.
+        return finish(STATUS_RECOVERY_REQUIRED, False,
+                      ["DEPLOY ABORTED: unresolved recovery marker. Restore the recorded "
+                       "original revision manually (see marker original_ref), remove the "
+                       "marker only after the tree is verified, then re-run deploy."])
+    if recovery == RECOVERY_RECOVERED:
+        # Recovery and deployment are separate transactional phases: stop here
+        # so the recovered state can be inspected before a new deploy mutates it.
+        return finish(STATUS_RECOVERED, False,
+                      ["Abandoned deploy recovered. Re-run deploy to retry."])
 
     # 1. Secret-free repository — GATE 26: validator exceptions fail closed
     try:
@@ -278,24 +313,48 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
 
 
 def _stop_running_instance(repo_root: Path = REPO_ROOT) -> bool:
-    """Stops WatchEdit instances launched from THIS repository (pythonw run.py)."""
+    """Stops WatchEdit instances launched from THE REQUESTED repository only.
+
+    W2-004: process identity is the resolved repo_root path, not the generic
+    'run.py + 9router_WatchEdit' text match, so instances started from other
+    worktrees/checkouts are never eligible for taskkill."""
+    repo_root = Path(repo_root).resolve()
+    target = str(repo_root).replace("'", "''")
+    # Match the resolved repo path as substring of the command line after
+    # path-separator normalization; PID ownership is re-checked per taskkill.
+    ps = (
+        "$t = '" + target + "'\n"
+        "Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | Where-Object {\n"
+        "  $c = $_.CommandLine\n"
+        "  $c -and $c.Contains('9router_WatchEdit') -and $c.Contains('run.py') -and\n"
+        "  (($c -replace '/', '\\') -like \"*$t*\")\n"
+        "} | Select-Object -ExpandProperty ProcessId"
+    )
     try:
         listing = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'run\\.py' -and $_.CommandLine -match '9router_WatchEdit' } | Select-Object -ExpandProperty ProcessId"],
+            ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, timeout=30)
         pids = [p.strip() for p in listing.stdout.split() if p.strip().isdigit()]
+        stopped = []
         for pid in pids:
-            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
-        return bool(pids)
+            res = subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, text=True)
+            if res.returncode == 0:
+                stopped.append(pid)
+        return bool(stopped)
     except Exception:
         return False
 
 
 def _start_instance(repo_root: Path = REPO_ROOT) -> bool:
+    """W2-004: launches the START script of THE REQUESTED repository (never the
+    module-global REPO_ROOT), with cwd pinned to the same repo."""
     try:
-        subprocess.Popen(["cmd", "/c", str(REPO_ROOT / "START_WATCHEDIT.bat")],
-                         cwd=str(REPO_ROOT), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        repo_root = Path(repo_root).resolve()
+        script = repo_root / "START_WATCHEDIT.bat"
+        if not script.is_file():
+            return False
+        subprocess.Popen(["cmd", "/c", str(script)],
+                         cwd=str(repo_root), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         return True
     except Exception:
         return False

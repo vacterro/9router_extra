@@ -189,7 +189,15 @@ class ScannerWorker:
             headers["x-9r-cli-token"] = cli_token
 
             limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
-            client_kwargs: Dict[str, Any] = {"timeout": DEFAULT_SLOW_TIMEOUT_SEC, "limits": limits}
+            client_kwargs: Dict[str, Any] = {
+                "timeout": DEFAULT_SLOW_TIMEOUT_SEC,
+                "limits": limits,
+                # Local 9router credentials must never cross a redirect to
+                # another host; never rely on httpx library defaults here.
+                "follow_redirects": False,
+                # A remote environment proxy must not receive local tokens.
+                "trust_env": False,
+            }
             if self.transport is not None:
                 client_kwargs["transport"] = self.transport
             async with httpx.AsyncClient(**client_kwargs) as http_client:
@@ -338,6 +346,7 @@ class ScannerWorker:
         existing = self.cache.get(cid)
         prev_counters = existing.counters if existing else EvidenceCounters()
         cost_override = existing.cost_override if existing else None
+        cost_hint = getattr(m, "cost_hint", None)
 
         url = f"{self.client.base_url}/api/models/test"
         headers = self.client._get_headers()
@@ -418,6 +427,7 @@ class ScannerWorker:
                 parsed_json = {"error": {"code": "probe_exception", "message": str(ex)}}
 
         elapsed_ms = (time.time() - start_t) * 1000.0
+        response_headers = dict(res.headers) if res is not None else {}
 
         # Parse Retry-After on 429
         conn_key = m.connection_id or m.provider_prefix.lower()
@@ -440,7 +450,9 @@ class ScannerWorker:
             model_id=m.model_id,
             previous_counters=prev_counters,
             cost_override=cost_override,
+            cost_hint=cost_hint,
             is_timeout=is_timeout,
+            response_headers=response_headers,
         )
 
         # Provider / Connection Circuit Breaker Trip condition

@@ -25,6 +25,7 @@ from typing import Callable, Dict, List, Optional
 from config import (
     LIVE_ACCESS_ENV,
     LOCAL_SETTINGS_FILE,
+    PRIVATE_STORAGE_AVAILABLE,
     SECURE_DIR,
 )
 from core.secret_store import DPAPIFileStore, VaultStore, dpapi_protect, dpapi_unprotect
@@ -52,12 +53,18 @@ class SecurityManager:
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir) if data_dir else SECURE_DIR
-        # GATE 19: unavailable private storage degrades to LOCKED, never crashes
-        try:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            self.storage_available = True
-        except OSError:
+        # GATE 19 + CORE-001: unavailable private storage degrades to LOCKED,
+        # never crashes, and NEVER invents a CWD-relative secure directory.
+        if data_dir is None and not PRIVATE_STORAGE_AVAILABLE:
             self.storage_available = False
+        elif not self.data_dir.is_absolute():
+            self.storage_available = False
+        else:
+            try:
+                self.data_dir.mkdir(parents=True, exist_ok=True)
+                self.storage_available = True
+            except OSError:
+                self.storage_available = False
         self._grant_path = self.data_dir / GRANT_FILE
         self._vault_path = self.data_dir / VAULT_FILE
         self._state = LOCKED
@@ -96,7 +103,7 @@ class SecurityManager:
     # ------------------------------------------------------- local settings
     def _read_local_settings(self) -> Dict:
         path = LOCAL_SETTINGS_FILE
-        if not path.exists():
+        if not path.is_absolute() or not path.exists():
             return {}
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -105,15 +112,23 @@ class SecurityManager:
 
     def _write_local_settings(self, data: Dict) -> None:
         path = LOCAL_SETTINGS_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = {}
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                existing = {}
-        existing.update(data)
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        if not path.is_absolute():
+            # CORE-001: no valid private root -> locked/read-only degradation,
+            # never a CWD-relative settings write.
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            existing = {}
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+            existing.update(data)
+            path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        except OSError:
+            # Storage degraded mid-session: settings stay unsaved, state stays LOCKED.
+            pass
 
     @property
     def trusted_os_unlock_enabled(self) -> bool:
@@ -137,6 +152,11 @@ class SecurityManager:
         The grant proves the operator approved live access on THIS machine for
         THIS Windows user; the blob is undecryptable anywhere else.
         """
+        if not self.storage_available:
+            # CORE-001: no private root -> no grant storage -> stay LOCKED.
+            raise PermissionError(
+                "Private storage unavailable; live access stays LOCKED (no secure root)"
+            )
         if self._grant_path.exists():
             raw = dpapi_unprotect(self._grant_path.read_bytes())
             doc = json.loads(raw.decode("utf-8"))
@@ -186,7 +206,7 @@ class SecurityManager:
 
     def revoke_os_grant(self) -> None:
         self.lock()
-        if self._grant_path.exists():
+        if self.storage_available and self._grant_path.exists():
             self._grant_path.unlink()
 
 

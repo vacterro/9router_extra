@@ -97,7 +97,8 @@ def test_gate_c_naked_404_is_route_error():
         raw_body="Cannot POST /v1/chat/completions",
     )
     assert res.availability == AvailabilityState.ROUTE_ERROR
-    assert res.availability != AvailabilityState.MODEL_MISSING
+    assert res.availability == AvailabilityState.ENDPOINT_OR_MODEL_INVALID
+    assert res.availability != AvailabilityState.MODEL_INVALID
     assert res.counters.consecutive_route_error == 1
     assert res.counters.consecutive_model_missing == 0
 

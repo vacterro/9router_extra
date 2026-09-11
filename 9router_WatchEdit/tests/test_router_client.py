@@ -4,7 +4,15 @@ Tests for core/router_client.py
 import pytest
 from core.router_client import RouterClient
 
-def test_cli_token_generation():
+def test_cli_token_generation(tmp_path, monkeypatch):
+    from core import router_client
+
+    machine = tmp_path / "synthetic-machine"
+    secret = tmp_path / "synthetic-cli"
+    machine.write_text("test-machine", encoding="utf-8")
+    secret.write_text("test-cli", encoding="utf-8")
+    monkeypatch.setattr(router_client, "MACHINE_ID_FILE", machine)
+    monkeypatch.setattr(router_client, "CLI_SECRET_FILE", secret)
     client = RouterClient()
     token = client.get_cli_token()
     assert isinstance(token, str)

@@ -12,7 +12,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from config import DEFAULT_ROUTER_BASE_URL
-from core.router_client import RouterClient
+from core.router_client import RouterClient, validate_router_base_url
 from core.history import HealthCache
 from core.discovery import ModelDiscovery
 from core.probe import ScannerWorker, ScanMode
@@ -113,9 +113,18 @@ def main():
     parser.add_argument("--scan", choices=["quick", "full", "failed"], default="quick", help="Scan mode for CLI")
     parser.add_argument("--combo", type=str, help="Scan only specific combo by name")
     parser.add_argument("--list-combos", action="store_true", help="List all combos from 9Router")
-    parser.add_argument("--router-url", type=str, default=DEFAULT_ROUTER_BASE_URL, help="9Router base URL")
+    parser.add_argument(
+        "--router-url", type=str, default=DEFAULT_ROUTER_BASE_URL,
+        help="Local 9Router URL: explicit loopback IP only (127.0.0.0/8 or [::1]); custom ports allowed",
+    )
 
     args = parser.parse_args()
+    try:
+        args.router_url = validate_router_base_url(args.router_url)
+    except ValueError as ex:
+        # argparse's type= error echoes the raw value, which may contain
+        # userinfo. Report only our value-independent validation message.
+        parser.error(f"--router-url: {ex}")
 
     if args.cli or args.list_combos or args.combo:
         run_cli_mode(args)

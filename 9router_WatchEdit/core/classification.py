@@ -14,26 +14,56 @@ from config import redact_secrets, FAILURE_STREAK_FOR_DEAD
 class AvailabilityState(str, Enum):
     LIVE = "LIVE"
     PENDING = "PENDING"
-    AUTH = "AUTH"
-    BALANCE = "BALANCE"
-    RATE_LIMIT = "RATE LIMIT"
-    TIMEOUT = "TIMEOUT"
-    TEMP_ERROR = "TEMP ERROR"
-    ROUTE_ERROR = "ROUTE ERROR"
-    MODEL_MISSING = "MODEL MISSING"
+    AUTH_REJECTED = "AUTH_REJECTED"
+    AUTH = "AUTH_REJECTED"  # Backward-compatible enum alias.
+    ACCESS_FORBIDDEN = "ACCESS_FORBIDDEN"
+    BALANCE_REQUIRED = "BALANCE_REQUIRED"
+    BALANCE = "BALANCE_REQUIRED"  # Backward-compatible enum alias.
+    RATE_LIMITED = "RATE_LIMITED"
+    RATE_LIMIT = "RATE_LIMITED"  # Backward-compatible enum alias.
+    CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
+    TIMEOUT = "CONNECT_TIMEOUT"  # Backward-compatible enum alias.
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    TEMP_ERROR = "PROVIDER_ERROR"  # Backward-compatible enum alias.
+    ENDPOINT_OR_MODEL_INVALID = "ENDPOINT_OR_MODEL_INVALID"
+    ROUTE_ERROR = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_INVALID = "MODEL_INVALID"
+    MODEL_MISSING = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_GONE = "MODEL_GONE"
+    ROUTER_DEGRADED = "ROUTER_DEGRADED"
+    DNS_FAILURE = "DNS_FAILURE"
+    NON_API_HTML_RESPONSE = "NON_API_HTML_RESPONSE"
+    WAF_BLOCKED = "WAF_BLOCKED"
+    BROWSER_CHALLENGE = "BROWSER_CHALLENGE"
+    MODEL_DISCOVERY_UNAVAILABLE = "MODEL_DISCOVERY_UNAVAILABLE"
     DEAD = "DEAD"
     UNKNOWN = "UNKNOWN"
 
 class HealthState(str, Enum):
     LIVE = "LIVE"
     PENDING = "PENDING"
-    AUTH = "AUTH"
-    BALANCE = "BALANCE"
-    RATE_LIMIT = "RATE LIMIT"
-    TIMEOUT = "TIMEOUT"
-    TEMP_ERROR = "TEMP ERROR"
-    ROUTE_ERROR = "ROUTE ERROR"
-    MODEL_MISSING = "MODEL MISSING"
+    AUTH_REJECTED = "AUTH_REJECTED"
+    AUTH = "AUTH_REJECTED"  # Backward-compatible enum alias.
+    ACCESS_FORBIDDEN = "ACCESS_FORBIDDEN"
+    BALANCE_REQUIRED = "BALANCE_REQUIRED"
+    BALANCE = "BALANCE_REQUIRED"  # Backward-compatible enum alias.
+    RATE_LIMITED = "RATE_LIMITED"
+    RATE_LIMIT = "RATE_LIMITED"  # Backward-compatible enum alias.
+    CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
+    TIMEOUT = "CONNECT_TIMEOUT"  # Backward-compatible enum alias.
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    TEMP_ERROR = "PROVIDER_ERROR"  # Backward-compatible enum alias.
+    ENDPOINT_OR_MODEL_INVALID = "ENDPOINT_OR_MODEL_INVALID"
+    ROUTE_ERROR = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_INVALID = "MODEL_INVALID"
+    MODEL_MISSING = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_GONE = "MODEL_GONE"
+    ROUTER_DEGRADED = "ROUTER_DEGRADED"
+    DNS_FAILURE = "DNS_FAILURE"
+    NON_API_HTML_RESPONSE = "NON_API_HTML_RESPONSE"
+    WAF_BLOCKED = "WAF_BLOCKED"
+    BROWSER_CHALLENGE = "BROWSER_CHALLENGE"
+    MODEL_DISCOVERY_UNAVAILABLE = "MODEL_DISCOVERY_UNAVAILABLE"
     DEAD = "DEAD"
     UNKNOWN = "UNKNOWN"
     FREE_USE = "FREE/USE"
@@ -44,6 +74,29 @@ class CostState(str, Enum):
     FREE = "FREE"
     PAID = "PAID"
     UNKNOWN = "UNKNOWN"
+
+
+class ReachabilityState(str, Enum):
+    """Whether any HTTP response was received from the provider path."""
+
+    REACHABLE = "REACHABLE"
+    UNREACHABLE = "UNREACHABLE"
+
+
+class AuthState(str, Enum):
+    """Authentication evidence, independent from completion availability."""
+
+    AUTH_OK = "AUTH_OK"
+    AUTH_REJECTED = "AUTH_REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class CatalogState(str, Enum):
+    """The independently observed state of the provider model catalogue."""
+
+    MODELS_AVAILABLE = "MODELS_AVAILABLE"
+    EMPTY_MODEL_CATALOG = "EMPTY_MODEL_CATALOG"
+    DISCOVERY_UNAVAILABLE = "DISCOVERY_UNAVAILABLE"
 
 # Backward compatibility alias
 CostStatus = CostState
@@ -121,14 +174,14 @@ class EvidenceRecord:
                     availability = AvailabilityState.LIVE
                 else:
                     try:
-                        availability = AvailabilityState(s_val)
+                        availability = _coerce_availability(s_val)
                     except Exception:
                         availability = AvailabilityState.UNKNOWN
             else:
                 availability = AvailabilityState.UNKNOWN
         elif isinstance(availability, str):
             try:
-                availability = AvailabilityState(availability)
+                availability = _coerce_availability(availability)
             except Exception:
                 availability = AvailabilityState.UNKNOWN
 
@@ -227,6 +280,76 @@ AUTH_KEYWORDS = re.compile(
     r'account suspended|invalid_token|401 unauthorized)'
 )
 
+MODEL_GONE_KEYWORDS = re.compile(
+    r'(?i)(model.*(?:gone|removed|retired|deprecated|no longer available)|'
+    r'(?:gone|removed|retired|deprecated).*model|endpoint.*(?:gone|removed|deprecated))'
+)
+
+DNS_KEYWORDS = re.compile(
+    r'(?i)(dns|name resolution|getaddrinfo|nodename nor servname|no such host|'
+    r'could not resolve|temporary failure in name resolution)'
+)
+
+WAF_BODY_MARKERS = re.compile(
+    r'(?i)(attention required\s*\|\s*cloudflare|you have been blocked|'
+    r'this website is using a security service|cf-chl-|challenge-platform|turnstile)'
+)
+
+BROWSER_CHALLENGE_MARKERS = re.compile(
+    r'(?i)(cf-chl-|challenge-platform|turnstile|just a moment\.\.\.)'
+)
+
+_LEGACY_AVAILABILITY_VALUES = {
+    "AUTH": AvailabilityState.AUTH_REJECTED,
+    "BALANCE": AvailabilityState.BALANCE_REQUIRED,
+    "RATE LIMIT": AvailabilityState.RATE_LIMITED,
+    "TIMEOUT": AvailabilityState.CONNECT_TIMEOUT,
+    "TEMP ERROR": AvailabilityState.PROVIDER_ERROR,
+    "ROUTE ERROR": AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+    "MODEL MISSING": AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+}
+
+
+def _coerce_availability(value: Any) -> AvailabilityState:
+    if isinstance(value, AvailabilityState):
+        return value
+    if value in _LEGACY_AVAILABILITY_VALUES:
+        return _LEGACY_AVAILABILITY_VALUES[value]
+    return AvailabilityState(value)
+
+
+def _normalise_response_headers(headers: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Return lower-case response headers without ever touching request secrets."""
+    if not headers:
+        return {}
+    try:
+        return {str(key).lower(): str(value) for key, value in headers.items()}
+    except AttributeError:
+        return {}
+
+
+def _is_html_body(raw_body: str, content_type: str = "") -> bool:
+    content_type = (content_type or "").lower()
+    if "text/html" in content_type or "application/xhtml" in content_type:
+        return True
+    return bool(re.search(r'(?is)<!doctype\s+html|<html\b|<!--\[if\s+lt\s+ie', raw_body or ""))
+
+
+def _has_waf_evidence(status_code: int, raw_body: str, headers: Dict[str, str]) -> bool:
+    if status_code != 403 or not _is_html_body(raw_body, headers.get("content-type", "")):
+        return False
+    has_waf_header = any(
+        name in headers
+        for name in ("server", "cf-ray", "cf-mitigated", "cf-cache-status", "x-sucuri-id", "x-waf-event")
+    ) and (
+        "cloudflare" in headers.get("server", "").lower()
+        or "cf-ray" in headers
+        or "cf-mitigated" in headers
+        or "x-sucuri-id" in headers
+        or "x-waf-event" in headers
+    )
+    return has_waf_header or bool(WAF_BODY_MARKERS.search(raw_body or ""))
+
 # Regex keywords for rate limits
 RATE_LIMIT_KEYWORDS = re.compile(
     r'(?i)(rate_limit_exceeded|too many requests|rate limit|resource_exhausted|'
@@ -246,6 +369,11 @@ def is_provider_or_model_known_free(provider_prefix: str, model_id: str) -> bool
     m = (model_id or "").lower()
     if p in KNOWN_FREE_PROVIDERS:
         return True
+    # Kira publishes per-model billing metadata. Do not apply the generic
+    # substring heuristic to Kira: a manual model ID is USE/? until current
+    # catalogue metadata or an explicit operator override establishes cost.
+    if p == "kira-ai":
+        return False
     if "free" in m or "trial" in m:
         return True
     return False
@@ -263,8 +391,12 @@ def classify_probe_result(
     model_id: str = "",
     previous_counters: Optional[EvidenceCounters] = None,
     cost_override: Optional[str] = None,
+    # Explicit provider catalogue metadata. This is separate from the
+    # operator override so unknown billing never silently becomes FREE/PAID.
+    cost_hint: Optional[str] = None,
     is_timeout: bool = False,
     previous_streak: Optional[int] = None,
+    response_headers: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> EvidenceRecord:
     """
@@ -278,6 +410,9 @@ def classify_probe_result(
         raw_body = str(kwargs["body"])
     if previous_counters is None and "prev_counters" in kwargs:
         previous_counters = kwargs["prev_counters"]
+    if response_headers is None:
+        response_headers = kwargs.get("headers")
+    response_headers = _normalise_response_headers(response_headers)
 
     counters = EvidenceCounters.from_dict(previous_counters.to_dict()) if previous_counters else EvidenceCounters()
     if previous_streak is not None and not previous_counters:
@@ -327,13 +462,72 @@ def classify_probe_result(
             error_msg = str(parsed_json.get("message"))
             error_code = str(parsed_json.get("status") or "")
 
-    # Extract embedded HTTP status from error string if present (e.g. "HTTP 404: ...")
+    # Extract the router's outer status and any embedded upstream status. The
+    # local model probe can return HTTP 503 with an upstream "[403]: HTML"
+    # detail; classify the rejecting layer instead of the wrapper.
+    upstream_status_code = None
+    if parsed_json and isinstance(parsed_json, dict):
+        json_status = parsed_json.get("status")
+        if isinstance(json_status, int) and json_status not in (0, 200) and status_code == 200:
+            status_code = json_status
+
     if error_msg:
         http_match = re.search(r'\bHTTP\s+(\d{3})\b', error_msg)
         if http_match:
             status_code = int(http_match.group(1))
+        inner_match = re.search(r'\[(\d{3})\]\s*:', error_msg)
+        if inner_match:
+            candidate = int(inner_match.group(1))
+            if candidate != status_code and status_code in (200, 500, 502, 503, 504):
+                upstream_status_code = candidate
+                status_code = candidate
 
     combined_text = f"{status_code} {error_code} {error_type} {error_msg} {clean_body}".lower()
+    content_type = response_headers.get("content-type", "")
+    is_html = _is_html_body(clean_body, content_type)
+
+    # HTML is not an API error payload. Cloudflare/WAF HTML is classified
+    # before generic auth handling, including when nested in a 9Router 503.
+    if _has_waf_evidence(status_code, clean_body, response_headers):
+        challenge = bool(BROWSER_CHALLENGE_MARKERS.search(clean_body))
+        return EvidenceRecord(
+            availability=AvailabilityState.BROWSER_CHALLENGE if challenge else AvailabilityState.WAF_BLOCKED,
+            cost=CostState.UNKNOWN,
+            confidence=Confidence.LIKELY_TEMPORARY,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            error_code="BROWSER_CHALLENGE" if challenge else "WAF_BLOCKED",
+            reason="Upstream returned an HTML WAF/challenge response; this is not an API-key JSON rejection.",
+            raw_error=clean_body[:300],
+            counters=counters,
+            note=f"upstream_status={upstream_status_code}" if upstream_status_code else "response_type=HTML",
+        )
+
+    if is_html:
+        return EvidenceRecord(
+            availability=AvailabilityState.NON_API_HTML_RESPONSE,
+            cost=CostState.UNKNOWN,
+            confidence=Confidence.LIKELY_TEMPORARY,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            error_code="NON_API_HTML_RESPONSE",
+            reason="Expected JSON API response, received HTML.",
+            raw_error=clean_body[:300],
+            counters=counters,
+        )
+
+    if DNS_KEYWORDS.search(combined_text) and error_code in ("network_error", ""):
+        return EvidenceRecord(
+            availability=AvailabilityState.DNS_FAILURE,
+            cost=CostState.UNKNOWN,
+            confidence=Confidence.LIKELY_TEMPORARY,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            error_code="DNS_FAILURE",
+            reason="DNS resolution failed before an HTTP response was received.",
+            raw_error=clean_body[:300],
+            counters=counters,
+        )
 
     # 3. Check Success (HTTP 200) - Strict Contract: requires ok=true or verified inference evidence
     if status_code == 200:
@@ -374,6 +568,10 @@ def classify_probe_result(
                 norm_override = cost_override.upper()
                 if norm_override in (CostState.FREE.value, CostState.PAID.value):
                     cost = CostState(norm_override)
+            if cost == CostState.UNKNOWN and cost_hint:
+                normalized_hint = str(cost_hint).upper()
+                if normalized_hint in (CostState.FREE.value, CostState.PAID.value):
+                    cost = CostState(normalized_hint)
             if cost == CostState.UNKNOWN:
                 if is_provider_or_model_known_free(provider_prefix, model_id):
                     cost = CostState.FREE
@@ -450,21 +648,34 @@ def classify_probe_result(
             counters=counters,
         )
 
-    # 5. Check AUTH (401, 403 or invalid credential keywords)
-    if (status_code in (401, 403) or AUTH_KEYWORDS.search(combined_text)) and not BALANCE_KEYWORDS.search(combined_text) and not RATE_LIMIT_KEYWORDS.search(combined_text):
+    # 5. Distinguish credential rejection from a valid but forbidden request.
+    if status_code == 403:
+        return EvidenceRecord(
+            availability=AvailabilityState.ACCESS_FORBIDDEN,
+            cost=CostState.UNKNOWN,
+            confidence=Confidence.CONFIG_ERROR,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            error_code=error_code or "ACCESS_FORBIDDEN",
+            reason="API returned JSON HTTP 403 access forbidden.",
+            raw_error=clean_body[:300],
+            counters=counters,
+        )
+
+    if (status_code == 401 or AUTH_KEYWORDS.search(combined_text)) and not BALANCE_KEYWORDS.search(combined_text) and not RATE_LIMIT_KEYWORDS.search(combined_text):
         counters.consecutive_auth += 1
         counters.consecutive_model_missing = 0
         counters.consecutive_timeout = 0
         counters.consecutive_rate_limit = 0
         counters.consecutive_route_error = 0
         return EvidenceRecord(
-            availability=AvailabilityState.AUTH,
+            availability=AvailabilityState.AUTH_REJECTED,
             cost=CostState.UNKNOWN,
             confidence=Confidence.CONFIG_ERROR,
             status_code=status_code,
             latency_ms=latency_ms,
             error_code=error_code or "unauthorized",
-            reason=f"Invalid API key, expired credential, or forbidden account access (streak: {counters.consecutive_auth}).",
+            reason=f"API returned JSON HTTP 401 authentication rejected (streak: {counters.consecutive_auth}).",
             raw_error=clean_body[:300],
             counters=counters,
         )
@@ -488,7 +699,22 @@ def classify_probe_result(
             counters=counters,
         )
 
-    # 7. Check MODEL MISSING vs ROUTE ERROR (HTTP 404)
+    # 7. HTTP 410 distinguishes a removed model from a degraded router.
+    if status_code == 410:
+        is_model_gone = bool(MODEL_GONE_KEYWORDS.search(combined_text) or "model" in error_code.lower())
+        return EvidenceRecord(
+            availability=AvailabilityState.MODEL_GONE if is_model_gone else AvailabilityState.ROUTER_DEGRADED,
+            cost=CostState.UNKNOWN,
+            confidence=Confidence.CONFIG_ERROR if is_model_gone else Confidence.LIKELY_TEMPORARY,
+            status_code=410,
+            latency_ms=latency_ms,
+            error_code=error_code or ("MODEL_GONE" if is_model_gone else "ROUTER_DEGRADED"),
+            reason="Provider reported a gone model." if is_model_gone else "Provider/router reported HTTP 410 without model-gone semantics.",
+            raw_error=clean_body[:300],
+            counters=counters,
+        )
+
+    # 8. Check MODEL MISSING vs ROUTE ERROR (HTTP 404)
     if status_code == 404:
         # A naked 404 (e.g. empty, generic nginx/html 404, or no semantic model error) is a ROUTE_ERROR, NOT MODEL_MISSING
         has_semantic_model_missing = bool(
@@ -541,7 +767,7 @@ def classify_probe_result(
                 counters=counters,
             )
 
-    # 8. Check Transient Errors (500, 502, 503, 504)
+    # 9. Check Transient Errors (500, 502, 503, 504)
     if status_code in (500, 502, 503, 504):
         # Inspect if 503 wrapped an inner semantic 404
         if SEMANTIC_MODEL_MISSING_KEYWORDS.search(combined_text):
@@ -596,4 +822,150 @@ def classify_probe_result(
         reason="Unclassified provider response.",
         raw_error=clean_body[:300],
         counters=counters,
+    )
+
+
+@dataclass(frozen=True)
+class ProviderHealthSummary:
+    """Provider health dimensions kept independent from one another.
+
+    ``provider_state``, ``model_state`` and ``discovery_state`` remain for
+    callers of the original API.  The explicit dimensions below are the
+    authoritative representation for routing and UI decisions.
+    """
+
+    provider_state: AvailabilityState
+    model_state: AvailabilityState
+    discovery_state: str
+    completion: EvidenceRecord
+    reachability: ReachabilityState
+    auth: AuthState
+    catalog: CatalogState
+    completion_state: AvailabilityState
+    usable: bool
+    active_routing: bool
+
+    @property
+    def routing_allowed(self) -> bool:
+        """Compatibility/readability alias for active routing decisions."""
+        return self.active_routing
+
+
+def _classify_models_catalog(
+    models_status_code: Optional[int],
+    models_raw_body: str,
+    models_parsed_json: Optional[Dict[str, Any]] = None,
+) -> CatalogState:
+    """Classify `/models` without confusing HTTP 200 + zero rows with PASS."""
+    if models_status_code != 200:
+        return CatalogState.DISCOVERY_UNAVAILABLE
+
+    payload = models_parsed_json
+    if payload is None and models_raw_body:
+        try:
+            decoded = json.loads(models_raw_body)
+            payload = decoded if isinstance(decoded, dict) else None
+        except (TypeError, ValueError):
+            payload = None
+
+    if not isinstance(payload, dict):
+        return CatalogState.DISCOVERY_UNAVAILABLE
+
+    # OpenAI-compatible providers use `data`; 9Router's normalized local
+    # provider route uses `models`. Support both, while never treating an
+    # absent/malformed list as a healthy catalogue.
+    rows = payload.get("data") if "data" in payload else payload.get("models")
+    if not isinstance(rows, list):
+        return CatalogState.DISCOVERY_UNAVAILABLE
+    return CatalogState.MODELS_AVAILABLE if rows else CatalogState.EMPTY_MODEL_CATALOG
+
+
+def _classify_reachability(
+    completion: EvidenceRecord,
+    models_status_code: Optional[int],
+) -> ReachabilityState:
+    """Any received HTTP response proves reachability of that request path."""
+    if models_status_code is not None and models_status_code >= 100:
+        return ReachabilityState.REACHABLE
+    if completion.status_code >= 100:
+        return ReachabilityState.REACHABLE
+    if completion.availability in (AvailabilityState.DNS_FAILURE, AvailabilityState.CONNECT_TIMEOUT):
+        return ReachabilityState.UNREACHABLE
+    return ReachabilityState.UNREACHABLE
+
+
+def _classify_auth(
+    completion: EvidenceRecord,
+    models_status_code: Optional[int],
+) -> AuthState:
+    """Use only explicit auth evidence; WAF/HTML is not an auth rejection."""
+    if models_status_code == 401 or completion.availability == AvailabilityState.AUTH_REJECTED:
+        return AuthState.AUTH_REJECTED
+    if models_status_code == 200 or completion.availability == AvailabilityState.LIVE:
+        return AuthState.AUTH_OK
+    return AuthState.UNKNOWN
+
+
+def classify_provider_state(
+    completion: EvidenceRecord,
+    models_status_code: Optional[int] = None,
+    models_raw_body: str = "",
+    models_parsed_json: Optional[Dict[str, Any]] = None,
+) -> ProviderHealthSummary:
+    """Classify provider dimensions without collapsing them into ``DEAD``.
+
+    A successful catalog call plus an invalid configured model means the
+    provider is reachable while that model is ``MODEL_INVALID``. A successful
+    completion plus a failed catalog call means the completion is LIVE with
+    ``DISCOVERY_UNAVAILABLE``. A successful empty catalog is an explicit
+    ``EMPTY_MODEL_CATALOG`` state and makes the provider unusable for active
+    routing, even if a completion probe returns LIVE.
+    """
+    catalog = _classify_models_catalog(models_status_code, models_raw_body, models_parsed_json)
+    reachability = _classify_reachability(completion, models_status_code)
+    auth = _classify_auth(completion, models_status_code)
+    model_state = completion.availability
+    if model_state == AvailabilityState.ENDPOINT_OR_MODEL_INVALID and models_status_code == 200:
+        model_state = AvailabilityState.MODEL_INVALID
+
+    provider_state = completion.availability
+    if completion.availability in (
+        AvailabilityState.LIVE,
+        AvailabilityState.MODEL_INVALID,
+        AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+    ) and models_status_code == 200:
+        provider_state = AvailabilityState.LIVE
+    elif completion.availability == AvailabilityState.LIVE:
+        provider_state = AvailabilityState.LIVE
+
+    # A provider is routable only after the endpoint is reachable, auth is
+    # not rejected, the catalogue has at least one model, and completion is
+    # a verified LIVE result. In particular, `/models` 200 + [] is not PASS.
+    usable = (
+        reachability == ReachabilityState.REACHABLE
+        and auth == AuthState.AUTH_OK
+        and catalog == CatalogState.MODELS_AVAILABLE
+        and completion.availability == AvailabilityState.LIVE
+    )
+    if catalog == CatalogState.EMPTY_MODEL_CATALOG:
+        provider_state = AvailabilityState.MODEL_DISCOVERY_UNAVAILABLE
+
+    if models_status_code == 200 and models_raw_body:
+        discovery_state = catalog.value
+    else:
+        # Preserve the old AVAILABLE value for callers that only supplied an
+        # HTTP status, while the explicit `catalog` field remains authoritative.
+        discovery_state = "MODEL_DISCOVERY_UNAVAILABLE" if catalog == CatalogState.DISCOVERY_UNAVAILABLE and models_status_code != 200 else "AVAILABLE"
+
+    return ProviderHealthSummary(
+        provider_state=provider_state,
+        model_state=model_state,
+        discovery_state=discovery_state,
+        completion=completion,
+        reachability=reachability,
+        auth=auth,
+        catalog=catalog,
+        completion_state=completion.availability,
+        usable=usable,
+        active_routing=usable,
     )

@@ -17,7 +17,7 @@ import time
 import pytest
 import httpx
 
-from core.classification import AvailabilityState, EvidenceCounters, classify_probe_result
+from core.classification import AvailabilityState, CatalogState, EvidenceCounters, classify_probe_result
 from core.combo_manager import StableCombo
 from core.discovery import DiscoveredModel, ModelDiscovery
 from core.history import HealthCache, ModelHealthRecord
@@ -203,7 +203,15 @@ def test_cancellation_stress_asyncio_debug_mode(monkeypatch, tmp_path):
     statuses = []
     worker.on_scan_completed = lambda status="COMPLETED": statuses.append(status)
 
-    canceller = threading.Thread(target=lambda: (time.sleep(0.12), worker.cancel()))
+    def cancel_after_first_probe():
+        deadline = time.monotonic() + 3.0
+        while not first_probe_seen.is_set() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        worker.cancel()
+
+    first_probe_seen = threading.Event()
+    worker.on_probe_started = lambda cid: first_probe_seen.set()
+    canceller = threading.Thread(target=cancel_after_first_probe)
     canceller.start()
 
     t0 = time.monotonic()
@@ -277,12 +285,12 @@ def test_live_discovery_outcome_tracking(tmp_path):
         {"id": "conn-nosupport", "name": "NoSupport Provider", "provider": "nosupportprov", "isActive": True, "providerSpecificData": {"prefix": "nsp"}},
     ]
     client.get_provider_nodes = lambda: []
-    client.get_kv = lambda: [
-        ("okp", '["m1", "m2"]'),
-        ("emp", '["only-model"]'),
-        ("fap", '["dead-listing"]'),
-        ("tmp", '["slow-listing"]'),
-        ("nsp", '["static-listing"]'),
+    client.get_kv_scoped = lambda: [
+        ("customModels", "okp", '["m1", "m2"]'),
+        ("customModels", "emp", '["only-model"]'),
+        ("customModels", "fap", '["dead-listing"]'),
+        ("customModels", "tmp", '["slow-listing"]'),
+        ("customModels", "nsp", '["static-listing"]'),
     ]
     client.get_catalog_models = lambda: []
     client.get_combos = lambda: []
@@ -316,15 +324,36 @@ def test_live_discovery_outcome_tracking(tmp_path):
 
     # Successful EMPTY discovery: confirmed absent -> False (negative evidence allowed)
     assert by_cid["emp/only-model"].advertised_live is False
+    assert discovery.catalog_states["conn-empty"] == CatalogState.EMPTY_MODEL_CATALOG
+    assert discovery.catalog_model_counts["conn-empty"] == 0
+    assert "conn-empty" in discovery.routing_excluded_connections
+    assert discovery.catalog_status_text("conn-empty") == "Models API: EMPTY (0 models)"
+    assert by_cid["emp/only-model"].routing_eligible is False
+    assert by_cid["emp/only-model"].routing_exclusion_reason == CatalogState.EMPTY_MODEL_CATALOG.value
+    assert by_cid["emp/only-model"] not in discovery.active_routing_models(models)
 
     # Failed discovery must remain UNKNOWN, never negative evidence
     assert by_cid["fap/dead-listing"].advertised_live is None
     assert by_cid["tmp/slow-listing"].advertised_live is None
     assert by_cid["nsp/static-listing"].advertised_live is None
 
+    # The provider row is retained and becomes eligible again after a later
+    # successful non-empty re-probe.
+    def recovered_live_detailed(cid):
+        if cid == "conn-empty":
+            return ("OK", [{"id": "emp/only-model"}])
+        return mock_live_detailed(cid)
+
+    client.get_connection_live_models_detailed = recovered_live_detailed
+    recovered = discovery.discover_all(include_combo_models=True, query_live=True)
+    recovered_by_cid = {m.canonical_id: m for m in recovered}
+    assert "conn-empty" not in discovery.routing_excluded_connections
+    assert discovery.catalog_states["conn-empty"] == CatalogState.MODELS_AVAILABLE
+    assert recovered_by_cid["emp/only-model"].routing_eligible is True
+
     # A fresh discover_all resets the previous outcome map
     client.get_providers = lambda: []
-    client.get_kv = lambda: []
+    client.get_kv_scoped = lambda: []
     discovery.discover_all(query_live=True)
     assert discovery.live_outcomes == {}
 

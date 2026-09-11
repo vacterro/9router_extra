@@ -2,10 +2,12 @@
 Tests for UI components (PySide6 / Qt)
 """
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QTextEdit
 from ui.theme import apply_theme
 from ui.watch_view import WatchView
-from ui.combo_editor_view import ComboEditorView
+from ui.combo_editor_view import ComboEditorView, DiffConfirmDialog
 from ui.presets_view import PresetsView
 from ui.inspector_panel import InspectorPanel
 from ui.activity_panel import ActivityPanel
@@ -97,8 +99,9 @@ def test_main_window_instantiation(qapp):
     assert window.combo_editor is not None
     assert window.activity is not None
     assert window.inspector is not None
-    assert window.top_splitter is not None
-    assert window.bottom_splitter is not None
+    assert window.vertical_splitter is not None
+    assert window.bottom_tabs is not None
+    assert window.bottom_tabs.count() == 2
     window.close()
 
 def test_font_no_antialias(qapp):
@@ -111,6 +114,106 @@ def test_font_no_antialias(qapp):
     assert f.hintingPreference() == QFont.HintingPreference.PreferFullHinting
     assert qapp.font().styleStrategy().value & QFont.StyleStrategy.NoAntialias.value
     assert qapp.font().hintingPreference() == QFont.HintingPreference.PreferFullHinting
+
+def test_diff_confirm_dialog_controls(qapp):
+    from core.combo_manager import ComboDiff
+
+    dialog = DiffConfirmDialog(ComboDiff(added=[("provider/model", 0)]))
+    dialog.show()
+    qapp.processEvents()
+
+    buttons = dialog.findChild(QDialogButtonBox)
+    text = dialog.findChild(QTextEdit)
+    apply_button = buttons.button(QDialogButtonBox.Ok)
+    cancel_button = buttons.button(QDialogButtonBox.Cancel)
+
+    assert buttons is not None
+    assert dialog.layout().indexOf(buttons) >= 0
+    assert buttons.parentWidget() is dialog
+    assert apply_button.text() == "Apply Changes"
+    assert apply_button.isVisible()
+    assert cancel_button.isVisible()
+    assert text.isVisible()
+    assert "provider/model" in text.toPlainText()
+
+    QTest.mouseClick(apply_button, Qt.LeftButton)
+    assert dialog.result() == QDialog.Accepted
+    dialog.close()
+    dialog.deleteLater()
+
+    dialog = DiffConfirmDialog(ComboDiff(removed=["provider/model"]))
+    dialog.show()
+    qapp.processEvents()
+    QTest.mouseClick(dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Cancel), Qt.LeftButton)
+    assert dialog.result() == QDialog.Rejected
+    dialog.close()
+    dialog.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qapp.processEvents()
+
+
+def test_combo_editor_save_apply_and_cancel(qapp, tmp_path, monkeypatch):
+    from core.combo_manager import StableCombo
+    from ui import combo_editor_view
+
+    class FakeClient:
+        def __init__(self):
+            self.models = ["existing/model"]
+            self.updated_at = "before"
+            self.update_calls = []
+
+        def get_combos(self):
+            return [{
+                "id": "c1",
+                "name": "TestCombo",
+                "kind": None,
+                "models": list(self.models),
+                "updatedAt": self.updated_at,
+            }]
+
+        def update_combo(self, combo_id, name, models, kind=None):
+            self.update_calls.append((combo_id, name, list(models), kind))
+            self.models = list(models)
+            self.updated_at = "after"
+            return {"id": combo_id, "name": name, "models": list(models)}
+
+    client = FakeClient()
+    cache = HealthCache(cache_file=tmp_path / "test_cache.json")
+    view = ComboEditorView(client, cache)
+    combo = StableCombo(
+        combo_id="c1",
+        name="TestCombo",
+        models=["existing/model", "cline/cline-free/muse-spark-1.3-contributor"],
+        baseline_models=["existing/model"],
+        baseline_updated_at="before",
+    )
+    view.current_combo = combo
+    messages = []
+    monkeypatch.setattr(combo_editor_view.QMessageBox, "information", lambda *args: messages.append(args[1:]))
+    monkeypatch.setattr(combo_editor_view.DiffConfirmDialog, "exec", lambda self: QDialog.Accepted)
+
+    view.save_current_combo()
+
+    assert client.update_calls == [(
+        "c1",
+        "TestCombo",
+        ["existing/model", "cline/cline-free/muse-spark-1.3-contributor"],
+        None,
+    )]
+    assert client.get_combos()[0]["models"] == combo.models
+    assert combo.has_unsaved_changes() is False
+    assert messages and messages[-1][0] == "Verified & Saved"
+
+    combo.add_model("another/model")
+    monkeypatch.setattr(combo_editor_view.DiffConfirmDialog, "exec", lambda self: QDialog.Rejected)
+    view.save_current_combo()
+    assert len(client.update_calls) == 1
+    view.change_detection_timer.stop()
+    view.close()
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qapp.processEvents()
+
 
 def test_combo_editor_reorder_and_drag_drop(qapp, tmp_path):
     from PySide6.QtCore import Qt

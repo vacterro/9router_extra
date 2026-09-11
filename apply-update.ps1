@@ -27,10 +27,14 @@ if ($proc) {
 $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $appDataRouter = Join-Path $env:APPDATA "9router"
 $backupDir = Join-Path $env:APPDATA "9router_backup_$timestamp"
+$backupScript = Join-Path $PSScriptRoot "tools/create_safety_backup.ps1"
 
 Write-Host "`n[2/5] Creating safety backup at $backupDir..." -ForegroundColor Yellow
 if (Test-Path $appDataRouter) {
-    Copy-Item -Path $appDataRouter -Destination $backupDir -Recurse -Force
+    if (-not (Test-Path -LiteralPath $backupScript -PathType Leaf)) {
+        Write-Error "Safety backup helper not found: $backupScript"
+    }
+    & $backupScript -SourceDir $appDataRouter -BackupParent $env:APPDATA -BackupName "9router_backup_$timestamp" -Keep 3 -MaxTotalMiB 512 | Out-Null
     Write-Host "Backup created successfully." -ForegroundColor Green
 }
 
@@ -47,14 +51,17 @@ npm install -g --force "$packagePath"
 # 4. Synchronize database state (Connections preserved, Combos untouched)
 Write-Host "`n[4/5] Synchronizing database state and providers..." -ForegroundColor Yellow
 $restoreScript = Join-Path $env:LOCALAPPDATA "9router_WatchEdit/engine/backup_tools/restore_state.js"
-estore_state.js"
-if (Test-Path $restoreScript) {
+$exportFile = Join-Path $env:LOCALAPPDATA "9router_WatchEdit/backups/private/providers-state-export.json"
+if ((Test-Path $restoreScript) -and (Test-Path $exportFile)) {
     node "$restoreScript"
+} else {
+    Write-Host "Database state is live and preserved." -ForegroundColor Gray
 }
 
 # 5. Launch 9Router
 Write-Host "`n[5/5] Launching updated 9Router..." -ForegroundColor Yellow
-Start-Process -FilePath "9router" -ArgumentList "--tray", "--skip-update" -WindowStyle Hidden
+Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-WindowStyle", "Hidden", "-Command", "9router -t --skip-update"
+Start-Sleep -Seconds 2
 
 Write-Host "`n=====================================================" -ForegroundColor Green
 Write-Host " Upgrade complete! 9Router v0.5.65-extra is running." -ForegroundColor Green

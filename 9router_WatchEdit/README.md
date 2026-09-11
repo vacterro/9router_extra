@@ -52,6 +52,15 @@ Real-time provider/model health scanner & combo editor control plane for local 9
 
 Availability is strictly decoupled from billing cost:
 
+Provider health is also represented as independent dimensions:
+- `REACHABILITY`: `REACHABLE` or `UNREACHABLE`.
+- `AUTH`: `AUTH_OK`, `AUTH_REJECTED`, or `UNKNOWN`.
+- `CATALOG`: `MODELS_AVAILABLE`, `EMPTY_MODEL_CATALOG`, or `DISCOVERY_UNAVAILABLE`.
+- `COMPLETION`: the completion probe state (`LIVE`, `WAF_BLOCKED`, `MODEL_INVALID`, etc.).
+- `USABLE`: true only when reachability, authentication, a non-empty catalog, and a verified live completion all pass.
+
+An HTTP 200 `/models` response with `data: []` is displayed as `Models API: EMPTY (0 models)`, not as a normal PASS. The provider entry remains available for later discovery, while its models are excluded from active routing until a non-empty catalog is observed.
+
 ### Availability States
 - `LIVE`: Endpoint responded with valid inference choice or token.
 - `PENDING`: Request currently in-flight.

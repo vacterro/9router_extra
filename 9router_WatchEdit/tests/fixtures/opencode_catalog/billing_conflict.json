@@ -1,0 +1,5 @@
+{"object": "list", "data": [
+    {"id": "deepseek-v4-flash"},
+    {"id": "deepseek-v4-flash-free", "pricing": {"free": true, "isFree": false}},
+    {"id": "opencode-lite-free", "pricing": {"free": "yes"}}
+]}

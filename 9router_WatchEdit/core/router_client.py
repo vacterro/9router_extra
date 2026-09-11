@@ -4,12 +4,14 @@ Handles machineId-based CLI token generation, provider discovery, model pinging,
 and safe combo updates.
 """
 import hashlib
+import ipaddress
 import json
 import sqlite3
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from urllib.parse import urlsplit
 import httpx
 
 from config import (
@@ -26,6 +28,117 @@ from config import (
 )
 from core.security import LiveAccessLockedError, SecurityManager, get_default_security
 
+# Loopback trust boundary: RouterClient carries LOCAL 9router authentication
+# material (x-9r-cli-token, local Bearer API key). Its target therefore must
+# resolve syntactically to an explicit loopback IP address. DNS hostnames are
+# never trusted for this boundary, and there is deliberately no override.
+_LOOPBACK_V4 = ipaddress.ip_network("127.0.0.0/8")
+_LOOPBACK_V6 = ipaddress.ip_address("::1")
+
+
+def validate_router_base_url(value: str) -> str:
+    """Authoritative loopback-only validation for the 9Router control plane URL.
+
+    Returns a normalized base URL, or raises ValueError. Fails closed: only an
+    explicitly numeric loopback host (127.0.0.0/8 or ::1) is accepted.
+    """
+    if not isinstance(value, str):
+        raise ValueError("Router base URL must be a string")
+    raw = value
+    if not raw:
+        raise ValueError("Router base URL must not be empty")
+    # urlsplit strips some controls; reject them before parsing to avoid
+    # disagreeing with the HTTP transport about the authority.
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw) or "\\" in raw:
+        raise ValueError("Router base URL must not contain whitespace, controls or backslashes")
+
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        raise ValueError("Router base URL is malformed") from None
+
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("Router base URL must use http or https")
+
+    if "?" in raw or "#" in raw:
+        raise ValueError("Router base URL must not contain a query or fragment")
+
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("Router base URL must not contain userinfo credentials (user:pass@host)")
+
+    host = parts.hostname
+    if not host:
+        raise ValueError("Router base URL has no host")
+
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        raise ValueError(
+            "Router base URL host must be an explicit numeric loopback IP "
+            "(127.0.0.0/8 or ::1); DNS hostnames are not accepted"
+        ) from None
+
+    if addr.version == 6:
+        if addr != _LOOPBACK_V6:
+            raise ValueError("Router base URL host must be IPv6 loopback ::1")
+    elif addr not in _LOOPBACK_V4:
+        raise ValueError("Router base URL host must be IPv4 loopback 127.0.0.0/8")
+
+    # Port range is intentionally NOT restricted: offline tests and tooling use
+    # deliberately unroutable loopback ports (e.g. 99999) to force connection
+    # failure. A syntactically numeric port is preserved as-is; a non-numeric
+    # port is malformed and rejected.
+    netloc = parts.netloc
+    if netloc.startswith("["):
+        close = netloc.find("]")
+        if close < 0:
+            raise ValueError("Malformed IPv6 authority in router base URL")
+        tail = netloc[close + 1:]
+        if tail and not tail.startswith(":"):
+            raise ValueError("Malformed authority in router base URL")
+        port_text = tail[1:]
+    else:
+        _, sep, port_text = netloc.partition(":")
+        if not sep:
+            port_text = ""
+    if netloc.endswith(":") or (port_text and (not port_text.isascii() or not port_text.isdigit())):
+        raise ValueError("Router base URL port must be numeric")
+
+    authority = f"[{addr}]" if addr.version == 6 else str(addr)
+    if port_text:
+        authority += f":{port_text}"
+    return f"{parts.scheme}://{authority}{parts.path}".rstrip("/")
+
+
+def _validate_live_models_payload(data: Any) -> Optional[List[Dict[str, Any]]]:
+    """Validate a decoded HTTP 200 body from the live provider models endpoint.
+
+    Returns the models list only when the whole payload matches the live
+    catalog schema: a JSON object with a `models` key whose value is a list of
+    objects, each carrying a usable non-empty string `id` or `name`. The
+    policy is atomic: a single malformed row rejects the entire catalog, so a
+    partially valid payload can never be merged as authoritative evidence.
+
+    Returns None for any schema violation. A genuine empty list is the only
+    authoritative empty-catalog representation and is returned as [].
+    """
+    if not isinstance(data, dict) or "models" not in data:
+        return None
+    models = data["models"]
+    if not isinstance(models, list):
+        return None
+    for row in models:
+        if not isinstance(row, dict):
+            return None
+        row_id = row.get("id")
+        row_name = row.get("name")
+        has_id = isinstance(row_id, str) and row_id.strip()
+        has_name = isinstance(row_name, str) and row_name.strip()
+        if not has_id and not has_name:
+            return None
+    return models
+
+
 class RouterClient:
     def __init__(
         self,
@@ -33,12 +146,25 @@ class RouterClient:
         db_path: Path = ROUTER_DB_PATH,
         security: Optional[SecurityManager] = None,
     ):
-        self.base_url = base_url.rstrip("/")
+        # Loopback boundary FIRST: an invalid or non-loopback target must fail
+        # here, before any machine-id / cli-secret / SQLite access and before
+        # any HTTP connection can exist. This constructor is the authoritative
+        # enforcement point; CLI validation is UX only.
+        self._base_url = validate_router_base_url(base_url)
         self.db_path = db_path
         self._cached_cli_token: Optional[str] = None
         self._cached_api_key: Optional[str] = None
         # Live-access gate: every network method refuses while SECRETS: LOCKED.
         self.security = security or get_default_security()
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        # Reconfiguration has the same boundary as construction.
+        self._base_url = validate_router_base_url(value)
 
     def _require_live(self, operation: str) -> None:
         self.security.require_live(operation)
@@ -119,8 +245,11 @@ class RouterClient:
     def is_server_reachable(self, timeout: float = 3.0) -> bool:
         """Quick health check against 9Router."""
         self._require_live("is_server_reachable")
+        # Every client below sets follow_redirects=False explicitly: local
+        # 9router credentials must never cross a redirect to another host,
+        # regardless of httpx library defaults.
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/version")
                 return res.status_code in (200, 401)
         except Exception:
@@ -134,7 +263,7 @@ class RouterClient:
         self._require_live("get_combos")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/combos", headers=headers)
                 if res.status_code == 200:
                     data = res.json()
@@ -149,7 +278,7 @@ class RouterClient:
         try:
             headers = self._get_headers()
             payload = {"name": name, "models": models, "kind": kind}
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
                 res = client.post(f"{self.base_url}/api/combos", headers=headers, json=payload)
                 if res.status_code in (200, 201):
                     return res.json()
@@ -166,7 +295,7 @@ class RouterClient:
         try:
             headers = self._get_headers()
             payload = {"name": name, "models": models, "kind": kind}
-            with httpx.Client(timeout=8.0) as client:
+            with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
                 res = client.put(f"{self.base_url}/api/combos/{combo_id}", headers=headers, json=payload)
                 if res.status_code in (200, 204):
                     return res.json() if res.content else {"id": combo_id, "name": name, "models": models}
@@ -186,7 +315,7 @@ class RouterClient:
         self._require_live("delete_combo")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=8.0) as client:
+            with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
                 res = client.delete(f"{self.base_url}/api/combos/{combo_id}", headers=headers)
                 return res.status_code in (200, 204)
         except Exception:
@@ -233,7 +362,7 @@ class RouterClient:
         self._require_live("get_providers")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=8.0) as client:
+            with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/providers", headers=headers)
                 if res.status_code == 200:
                     data = res.json()
@@ -247,7 +376,7 @@ class RouterClient:
         self._require_live("get_provider_nodes")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=8.0) as client:
+            with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/provider-nodes", headers=headers)
                 if res.status_code == 200:
                     data = res.json()
@@ -261,7 +390,7 @@ class RouterClient:
         self._require_live("get_catalog_models")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=10.0, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/models", headers=headers)
                 if res.status_code == 200:
                     data = res.json()
@@ -273,16 +402,27 @@ class RouterClient:
     def get_connection_live_models_detailed(self, connection_id: str) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Fetches live upstream models with explicit outcome status:
-        ('OK', models), ('TIMEOUT', []), ('NOT_SUPPORTED', []), or ('FAILED', [])
+        ('OK', models), ('INVALID', []), ('TIMEOUT', []), ('NOT_SUPPORTED', []),
+        or ('FAILED', []).
+
+        HTTP 200 alone is not success: the decoded body must match the live
+        catalog schema (see _validate_live_models_payload). A schema violation
+        yields ('INVALID', []) — discovery unavailable, never an empty catalog.
         """
         self._require_live("get_connection_live_models")
         try:
             headers = self._get_headers()
-            with httpx.Client(timeout=12.0) as client:
+            with httpx.Client(timeout=12.0, follow_redirects=False, trust_env=False) as client:
                 res = client.get(f"{self.base_url}/api/providers/{connection_id}/models", headers=headers)
                 if res.status_code == 200:
-                    data = res.json()
-                    return ("OK", data.get("models", []))
+                    try:
+                        data = res.json()
+                    except Exception:
+                        return ("INVALID", [])
+                    models = _validate_live_models_payload(data)
+                    if models is None:
+                        return ("INVALID", [])
+                    return ("OK", models)
                 elif res.status_code in (404, 405, 501):
                     return ("NOT_SUPPORTED", [])
                 else:
@@ -307,7 +447,7 @@ class RouterClient:
         payload = {"model": model, "kind": "llm"}
         start = datetime.now()
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 res = client.post(f"{self.base_url}/api/models/test", headers=headers, json=payload)
                 elapsed_ms = (datetime.now() - start).total_seconds() * 1000.0
                 try:
@@ -344,22 +484,31 @@ class RouterClient:
                 "json_response": None,
             }
 
-    def probe_chat_completion(self, model: str, timeout: float = 15.0) -> Dict[str, Any]:
+    def probe_chat_completion(
+        self,
+        model: str,
+        timeout: float = 15.0,
+        provider_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Sends minimal completion to POST /v1/chat/completions for deep operational triage.
         Returns raw status, full response body and latency.
         """
         self._require_live("probe_chat_completion")
         headers = self._get_headers(include_bearer=True)
+        upstream_model = model
+        if provider_id:
+            from core.provider_profiles import upstream_model_id
+            upstream_model = upstream_model_id(model, provider_id)
         payload = {
-            "model": model,
+            "model": upstream_model,
             "messages": [{"role": "user", "content": PROBE_PROMPT}],
             "max_tokens": PROBE_MAX_TOKENS,
             "stream": False,
         }
         start = datetime.now()
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 res = client.post(f"{self.base_url}/v1/chat/completions", headers=headers, json=payload)
                 elapsed_ms = (datetime.now() - start).total_seconds() * 1000.0
                 raw_text = res.text
@@ -528,18 +677,34 @@ class RouterClient:
         return nodes
 
     def get_kv(self) -> List[Tuple[str, str]]:
-        """Fetch all key-value entries from 9Router SQLite (read-only mode)."""
-        return self._get_kv_sqlite()
+        """Fetch all key-value entries from 9Router SQLite (read-only mode).
+
+        Returns (key, value) pairs with the semantic `scope` column dropped.
+        Prefer `get_kv_scoped` when discovery needs the scope discriminator.
+        """
+        return [(k, v) for (_, k, v) in self.get_kv_scoped()]
+
+    def get_kv_scoped(self) -> List[Tuple[str, str, str]]:
+        """Fetch all kv rows preserving the semantic `scope` discriminator.
+
+        Returns (scope, key, value) triples so discovery can distinguish
+        authoritative positive scopes (e.g. `customModels`) from exclusion
+        metadata (e.g. `disabledModels`) and unknown scopes.
+        """
+        return self._get_kv_sqlite_scoped()
 
     def _get_kv_sqlite(self) -> List[Tuple[str, str]]:
+        return [(k, v) for (_, k, v) in self._get_kv_sqlite_scoped()]
+
+    def _get_kv_sqlite_scoped(self) -> List[Tuple[str, str, str]]:
         if not self.db_path.exists():
             return []
         try:
             conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
-            cursor.execute("SELECT key, value FROM kv")
+            cursor.execute("SELECT scope, key, value FROM kv")
             rows = cursor.fetchall()
             conn.close()
-            return [(str(r[0]), str(r[1])) for r in rows]
+            return [(str(r[0] or ""), str(r[1]), str(r[2])) for r in rows]
         except Exception:
             return []

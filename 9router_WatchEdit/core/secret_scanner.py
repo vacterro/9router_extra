@@ -112,6 +112,13 @@ BENIGN_TOKEN_RE = re.compile(
 # rules and structured scanning are unaffected.
 TEST_IDENTIFIER_RE = re.compile(r'^test_[a-z0-9_]+$')
 
+# SAIOPS operation markers: protocol bookkeeping ids of the fixed shape
+# <opword>-<32 lowercase hex> (checkpoint-, transition-, ticket-, claim-,
+# attempt-open-/-close-, goal-...). They name engine operations, never
+# credential material, and routinely sit on LOG lines that also contain the
+# word "ticket"/"credential" in audit prose.
+SAIOPS_OP_ID_RE = re.compile(r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9a-f]{32}$')
+
 BINARY_SUFFIXES = {
     ".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", ".db-wal", ".db-shm", ".tgz", ".zip", ".gz",
     ".png", ".jpg", ".jpeg", ".ico", ".exe", ".dll", ".pyd", ".pdf", ".woff",
@@ -290,7 +297,7 @@ def _scan_text(text: str, path: Path, findings: List[Finding], structured: bool 
                 # snake_case test identifiers); require digit+letter mix:
                 # plain code identifiers (camelCase function names near the
                 # word 'credentials') are not secrets
-                if BENIGN_TOKEN_RE.search(tok) or TEST_IDENTIFIER_RE.match(tok):
+                if BENIGN_TOKEN_RE.search(tok) or TEST_IDENTIFIER_RE.match(tok) or SAIOPS_OP_ID_RE.match(tok):
                     continue
                 if (not _is_placeholder(tok) and _entropy(tok) >= 3.8
                         and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok)):

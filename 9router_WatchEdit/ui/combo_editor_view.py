@@ -178,6 +178,7 @@ class DiffConfirmDialog(QDialog):
         buttons.button(QDialogButtonBox.Ok).setText("Apply Changes")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 class ReorderableComboListWidget(QListWidget):
     order_changed = Signal()
@@ -242,26 +243,27 @@ class ComboEditorView(QWidget):
         self.combos: Dict[str, StableCombo] = {}  # combo_id -> StableCombo
         self.current_combo: Optional[StableCombo] = None
         self.available_models: List[DiscoveredModel] = []
+        self._routing_blocked_model_ids: Set[str] = set()
         self._setup_ui()
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(4, 2, 4, 2)
+        main_layout.setSpacing(3)
 
         # External Change Banner
         self.banner_external_change = QWidget()
         self.banner_external_change.setStyleSheet(f"background-color: {COLOR_SURFACE}; border: 1px solid {COLOR_BORDER_HIGHLIGHT};")
         b_layout = QHBoxLayout(self.banner_external_change)
-        b_layout.setContentsMargins(6, 4, 6, 4)
-        b_layout.setSpacing(8)
+        b_layout.setContentsMargins(4, 2, 4, 2)
+        b_layout.setSpacing(4)
 
-        lbl_b = QLabel("WARNING: External change detected in 9Router. Combo was modified outside WatchEdit.")
-        lbl_b.setStyleSheet(f"color: {COLOR_BORDER_HIGHLIGHT}; font-weight: bold;")
+        lbl_b = QLabel("External change detected!")
+        lbl_b.setStyleSheet(f"color: {COLOR_BORDER_HIGHLIGHT}; font-weight: bold; font-size: 10px;")
         b_layout.addWidget(lbl_b)
         b_layout.addStretch()
 
-        btn_b_reload = QPushButton("Reload from Server")
+        btn_b_reload = QPushButton("Reload")
         btn_b_reload.clicked.connect(self._reload_current_from_server)
         b_layout.addWidget(btn_b_reload)
 
@@ -272,23 +274,35 @@ class ComboEditorView(QWidget):
         self.banner_external_change.setVisible(False)
         main_layout.addWidget(self.banner_external_change)
 
-        # Top Bar: Combo Selector & Actions
-        top_bar = QHBoxLayout()
-        top_bar.setSpacing(6)
+        # Top Bar Row 1: Combo Selector + Save
+        top_row1 = QHBoxLayout()
+        top_row1.setSpacing(4)
 
-        top_bar.addWidget(QLabel("Active Combo:"))
+        top_row1.addWidget(QLabel("Combo:"))
         self.cb_combo_selector = QComboBox()
-        self.cb_combo_selector.setMinimumWidth(180)
+        self.cb_combo_selector.setMinimumWidth(120)
         self.cb_combo_selector.currentIndexChanged.connect(self._on_combo_selection_changed)
-        top_bar.addWidget(self.cb_combo_selector)
+        top_row1.addWidget(self.cb_combo_selector, stretch=1)
 
-        self.btn_new_combo = QPushButton("New Combo")
+        self.btn_save = QPushButton("SAVE TO 9ROUTER")
+        self.btn_save.setObjectName("primaryAction")
+        self.btn_save.setFixedHeight(22)
+        self.btn_save.clicked.connect(self.save_current_combo)
+        top_row1.addWidget(self.btn_save)
+
+        main_layout.addLayout(top_row1)
+
+        # Top Bar Row 2: Action buttons
+        top_row2 = QHBoxLayout()
+        top_row2.setSpacing(3)
+
+        self.btn_new_combo = QPushButton("New")
         self.btn_new_combo.clicked.connect(self._create_new_combo)
 
         self.btn_rename = QPushButton("Rename")
         self.btn_rename.clicked.connect(self._rename_combo)
 
-        self.btn_duplicate = QPushButton("Duplicate")
+        self.btn_duplicate = QPushButton("Dup")
         self.btn_duplicate.clicked.connect(self._duplicate_combo)
 
         self.btn_revert = QPushButton("Revert")
@@ -301,21 +315,12 @@ class ComboEditorView(QWidget):
         self.btn_delete.setObjectName("dangerAction")
         self.btn_delete.clicked.connect(self._delete_combo)
 
-        top_bar.addWidget(self.btn_new_combo)
-        top_bar.addWidget(self.btn_rename)
-        top_bar.addWidget(self.btn_duplicate)
-        top_bar.addWidget(self.btn_revert)
-        top_bar.addWidget(self.btn_reload)
-        top_bar.addWidget(self.btn_delete)
-        top_bar.addStretch()
+        for btn in (self.btn_new_combo, self.btn_rename, self.btn_duplicate,
+                    self.btn_revert, self.btn_reload, self.btn_delete):
+            top_row2.addWidget(btn)
+        top_row2.addStretch()
 
-        self.btn_save = QPushButton("SAVE TO 9ROUTER")
-        self.btn_save.setObjectName("primaryAction")
-        self.btn_save.setFixedHeight(24)
-        self.btn_save.clicked.connect(self.save_current_combo)
-        top_bar.addWidget(self.btn_save)
-
-        main_layout.addLayout(top_bar)
+        main_layout.addLayout(top_row2)
 
         # Passive External Change Detection Timer
         self.change_detection_timer = QTimer(self)
@@ -354,13 +359,13 @@ class ComboEditorView(QWidget):
         reorder_bar = QHBoxLayout()
         reorder_bar.setSpacing(4)
 
-        self.btn_move_up = QPushButton("Move Up (▲)")
+        self.btn_move_up = QPushButton("▲ Up")
         self.btn_move_up.clicked.connect(self._move_up)
 
-        self.btn_move_down = QPushButton("Move Down (▼)")
+        self.btn_move_down = QPushButton("▼ Down")
         self.btn_move_down.clicked.connect(self._move_down)
 
-        self.btn_remove = QPushButton("Remove Selected (✖)")
+        self.btn_remove = QPushButton("✖ Remove")
         self.btn_remove.clicked.connect(self._remove_selected)
 
         reorder_bar.addWidget(self.btn_move_up)
@@ -372,13 +377,13 @@ class ComboEditorView(QWidget):
         smart_bar = QHBoxLayout()
         smart_bar.setSpacing(4)
 
-        self.btn_smart_top = QPushButton("Move Healthy to Top")
+        self.btn_smart_top = QPushButton("Healthy↑")
         self.btn_smart_top.clicked.connect(self._smart_move_healthy_to_top)
 
-        self.btn_smart_purge = QPushButton("Remove DEAD")
+        self.btn_smart_purge = QPushButton("Purge DEAD")
         self.btn_smart_purge.clicked.connect(self._smart_remove_dead)
 
-        self.btn_smart_add_free = QPushButton("Add all FREE/USE")
+        self.btn_smart_add_free = QPushButton("+FREE/USE")
         self.btn_smart_add_free.clicked.connect(self._smart_add_all_free)
 
         smart_bar.addWidget(self.btn_smart_top)
@@ -400,7 +405,7 @@ class ComboEditorView(QWidget):
 
         self.txt_picker_search = QLineEdit()
         self.txt_picker_search.setPlaceholderText("Search...")
-        self.txt_picker_search.setFixedWidth(130)
+        self.txt_picker_search.setMaximumWidth(120)
         self.txt_picker_search.textChanged.connect(self._filter_available_models)
         right_header.addWidget(self.txt_picker_search)
 
@@ -421,8 +426,8 @@ class ComboEditorView(QWidget):
         ]
         self._picker_filter_state = "USE"
         for p_state, p_label in picker_pill_defs:
-            btn = QPushButton(f"[{p_label}]")
-            btn.setFixedHeight(18)
+            btn = QPushButton(p_label)
+            btn.setFixedHeight(16)
             btn.setFont(get_app_font(10))
             if p_state == "USE":
                 btn.setStyleSheet(f"background-color: {COLOR_BORDER_HIGHLIGHT}; color: #000000; font-weight: bold;")
@@ -441,7 +446,7 @@ class ComboEditorView(QWidget):
 
         # Picker action bar
         picker_bar = QHBoxLayout()
-        self.btn_add_to_combo = QPushButton("+ Add Selected to Combo")
+        self.btn_add_to_combo = QPushButton("+ Add to Combo")
         self.btn_add_to_combo.setObjectName("primaryAction")
         self.btn_add_to_combo.clicked.connect(self._add_selected_from_picker)
         picker_bar.addWidget(self.btn_add_to_combo)
@@ -486,7 +491,13 @@ class ComboEditorView(QWidget):
             self._select_combo_by_index(0)
 
     def set_available_models(self, models: List[DiscoveredModel]):
-        self.available_models = models
+        # Empty live catalogues are authoritative negative routing evidence,
+        # but their inventory rows remain known for audit and re-probing.
+        self._routing_blocked_model_ids = {
+            m.canonical_id for m in models if not m.routing_eligible
+        }
+        self.available_models = [m for m in models if m.routing_eligible]
+        self._refresh_combo_models_list()
         self._refresh_available_list()
 
     def _on_picker_filter_pill_clicked(self, state: str):
@@ -581,7 +592,8 @@ class ComboEditorView(QWidget):
             state_text = f"[{rec.state}]" if rec else "[UNTESTED]"
             lat_text = f"{rec.latency_ms:.0f}ms" if rec and rec.latency_ms else "--"
 
-            text = f"#{idx + 1:02d}  {m}   {state_text} ({lat_text})"
+            routing_text = " [CATALOG EMPTY - ROUTING BLOCKED]" if m in self._routing_blocked_model_ids else ""
+            text = f"#{idx + 1:02d}  {m}   {state_text} ({lat_text}){routing_text}"
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, m)
 
@@ -592,6 +604,8 @@ class ComboEditorView(QWidget):
                     item.setForeground(QColor(cfg["fg"]))
             else:
                 item.setForeground(QColor(COLOR_TEXT_MUTED))
+            if m in self._routing_blocked_model_ids:
+                item.setForeground(QColor(COLOR_DANGER))
 
             self.list_combo_models.addItem(item)
 
@@ -678,6 +692,8 @@ class ComboEditorView(QWidget):
     def _on_model_dropped_from_picker(self, canonical_id: str, target_idx: int):
         if not self.current_combo:
             return
+        if canonical_id in self._routing_blocked_model_ids:
+            return
         if canonical_id in self.current_combo.models:
             self.current_combo.reorder_model(canonical_id, target_idx)
         else:
@@ -701,6 +717,8 @@ class ComboEditorView(QWidget):
     def add_model_to_current(self, canonical_id: str):
         """Adds a single model directly (e.g. from Inspector)."""
         if self.current_combo:
+            if canonical_id in self._routing_blocked_model_ids:
+                return
             if self.current_combo.add_model(canonical_id):
                 self._refresh_combo_models_list()
                 self._refresh_available_list()

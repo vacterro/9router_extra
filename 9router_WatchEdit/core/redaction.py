@@ -41,6 +41,7 @@ _TEXT_PATTERNS = [
     re.compile(r'(?i)(authorization\s*[:=]\s*)\S+'),
     re.compile(r'sk-[a-zA-Z0-9_\-\.]{12,}'),
     re.compile(r'9r-[a-zA-Z0-9_\-\.]{8,}'),
+    re.compile(r'(?i)kira_[a-zA-Z0-9_\-\.]{8,}'),
     re.compile(r'\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\b'),
     re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY(?: BLOCK)?-----'),
     # credentials embedded in URLs: https://user:pass@host, redis://:pass@host

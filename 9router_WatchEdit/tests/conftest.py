@@ -16,3 +16,10 @@ import pytest
 def _allow_live_for_unit_tests(monkeypatch):
     monkeypatch.setenv("WATCHEDIT_LIVE_ACCESS", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_main_window_startup_refresh(monkeypatch):
+    from ui.main_window import MainWindow
+
+    monkeypatch.setattr(MainWindow, "refresh_all_async", lambda self: None)

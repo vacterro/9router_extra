@@ -40,34 +40,34 @@ class InspectorPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
 
         # Title / Group Box
-        self.group = QGroupBox("MODEL DIAGNOSTIC INSPECTOR")
+        self.group = QGroupBox("DIAGNOSTIC INSPECTOR")
         group_layout = QVBoxLayout(self.group)
-        group_layout.setContentsMargins(8, 14, 8, 8)
-        group_layout.setSpacing(6)
+        group_layout.setContentsMargins(4, 8, 4, 4)
+        group_layout.setSpacing(3)
 
         # Model Identity Header
         self.lbl_canonical_id = QLabel("No model selected")
-        self.lbl_canonical_id.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLOR_BORDER_HIGHLIGHT};")
+        self.lbl_canonical_id.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_BORDER_HIGHLIGHT};")
         self.lbl_canonical_id.setTextInteractionFlags(Qt.TextSelectableByMouse)
         group_layout.addWidget(self.lbl_canonical_id)
 
         self.lbl_provider = QLabel("Provider: --")
-        self.lbl_provider.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY};")
+        self.lbl_provider.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px;")
         group_layout.addWidget(self.lbl_provider)
 
         # State & Confidence Row
         state_row = QHBoxLayout()
-        state_row.setSpacing(6)
+        state_row.setSpacing(4)
         self.lbl_state_badge = QLabel("STATE: --")
-        self.lbl_state_badge.setStyleSheet("padding: 2px 8px; font-weight: bold; border: 1px solid #000;")
+        self.lbl_state_badge.setStyleSheet("padding: 1px 6px; font-weight: bold; border: 1px solid #000;")
         state_row.addWidget(self.lbl_state_badge)
 
         self.lbl_confidence = QLabel("Confidence: --")
-        self.lbl_confidence.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY};")
+        self.lbl_confidence.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px;")
         state_row.addWidget(self.lbl_confidence)
         state_row.addStretch()
         group_layout.addLayout(state_row)
@@ -76,8 +76,8 @@ class InspectorPanel(QWidget):
         metrics_frame = QFrame()
         metrics_frame.setObjectName("beveledFrameSunken")
         metrics_layout = QVBoxLayout(metrics_frame)
-        metrics_layout.setContentsMargins(6, 6, 6, 6)
-        metrics_layout.setSpacing(4)
+        metrics_layout.setContentsMargins(4, 3, 4, 3)
+        metrics_layout.setSpacing(2)
 
         self.lbl_http = QLabel("HTTP Status: -- | Latency: -- ms")
         self.lbl_streaks = QLabel("Success Streak: 0 | Failure Streak: 0")
@@ -103,7 +103,7 @@ class InspectorPanel(QWidget):
         group_layout.addWidget(QLabel("Raw Abbreviated Response (Redacted):"))
         self.txt_raw_error = QTextEdit()
         self.txt_raw_error.setReadOnly(True)
-        self.txt_raw_error.setFixedHeight(80)
+        self.txt_raw_error.setFixedHeight(60)
         self.txt_raw_error.setStyleSheet(f"background-color: {COLOR_BACKGROUND_SOFT}; font-size: 10px;")
         group_layout.addWidget(self.txt_raw_error)
 

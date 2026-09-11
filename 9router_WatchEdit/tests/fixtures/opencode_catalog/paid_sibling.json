@@ -1,0 +1,4 @@
+{"object": "models", "data": [
+    {"id": "deepseek-v4-flash", "pricing": {"paid": true}},
+    {"id": "deepseek-v4-flash-free"}
+]}

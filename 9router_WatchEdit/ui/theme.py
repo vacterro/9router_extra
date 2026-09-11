@@ -76,8 +76,8 @@ QGroupBox {{
     border-left-color: {COLOR_BEVEL_LIGHT};
     border-bottom-color: {COLOR_BORDER_DARK};
     border-right-color: {COLOR_BORDER_DARK};
-    margin-top: 14px;
-    padding-top: 10px;
+    margin-top: 10px;
+    padding-top: 6px;
     font-weight: bold;
     color: {COLOR_TEXT_PRIMARY};
 }}
@@ -118,8 +118,8 @@ QPushButton {{
     border-left-color: {COLOR_BEVEL_LIGHT};
     border-bottom-color: {COLOR_BORDER_DARK};
     border-right-color: {COLOR_BORDER_DARK};
-    padding: 4px 10px;
-    min-height: 16px;
+    padding: 2px 6px;
+    min-height: 18px;
     font-weight: bold;
 }}
 
@@ -218,7 +218,7 @@ QHeaderView::section {{
     border-left-color: {COLOR_BEVEL_LIGHT};
     border-bottom-color: {COLOR_BORDER_DARK};
     border-right-color: {COLOR_BORDER_DARK};
-    padding: 3px 6px;
+    padding: 2px 4px;
     font-weight: bold;
 }}
 
@@ -240,7 +240,7 @@ QTabBar::tab {{
     border-left-color: {COLOR_BEVEL_LIGHT};
     border-bottom-color: {COLOR_BORDER_DARK};
     border-right-color: {COLOR_BORDER_DARK};
-    padding: 5px 12px;
+    padding: 3px 8px;
     margin-right: 2px;
     font-weight: bold;
 }}

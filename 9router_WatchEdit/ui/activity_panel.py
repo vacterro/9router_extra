@@ -40,14 +40,14 @@ class ActivityPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(2)
 
         frame = QFrame()
         frame.setObjectName("beveledFrameSunken")
         frame_layout = QVBoxLayout(frame)
-        frame_layout.setContentsMargins(6, 4, 6, 4)
-        frame_layout.setSpacing(3)
+        frame_layout.setContentsMargins(4, 2, 4, 2)
+        frame_layout.setSpacing(2)
 
         # Top line: Status text, In-flight ticker, and Stop Button
         top_row = QHBoxLayout()
@@ -72,7 +72,7 @@ class ActivityPanel(QWidget):
 
         # Progress bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setFixedHeight(10)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%v / %m (%p%)")

@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import threading
 from typing import Dict, List, Optional
-from PySide6.QtCore import Qt, QObject, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QPushButton,
+    QTabWidget,
 )
 
 from config import SETTINGS_FILE
@@ -35,6 +36,7 @@ from core.combo_manager import PresetManager, compute_combo_diff, StableCombo
 from core.probe import ScannerWorker, ScanMode
 from core.security import get_default_security
 from core.redaction import redact_text
+from core.opencode_catalog import OpenCodeCatalogDiscovery
 from ui.watch_view import WatchView
 from ui.combo_editor_view import ComboEditorView, DiffConfirmDialog
 from ui.presets_view import PresetsView
@@ -42,6 +44,7 @@ from ui.inspector_panel import InspectorPanel
 from ui.activity_panel import ActivityPanel
 from ui.security_ui import SecurityDialog, SecurityIndicator
 from ui.theme import COLOR_BORDER_HIGHLIGHT
+from ui.opencode_catalog_view import OpenCodeCatalogPanel
 
 class ScannerSignals(QObject):
     probe_started = Signal(str)
@@ -53,12 +56,13 @@ class ScannerSignals(QObject):
     discovery_finished = Signal(list)  # List[DiscoveredModel]
     discovery_failed = Signal(str)
     combos_loaded = Signal(list)
+    catalog_refreshed = Signal(dict)  # OpenCode catalog refresh result
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("9router_WatchEdit — Operational Health Scanner & Combo Controller")
-        self.resize(1180, 760)
+        self.resize(800, 640)
 
         # Core Services
         self.security = get_default_security()
@@ -83,6 +87,9 @@ class MainWindow(QMainWindow):
         self.signals.discovery_finished.connect(self._on_discovery_finished)
         self.signals.discovery_failed.connect(self._on_discovery_failed)
         self.signals.combos_loaded.connect(self._on_combos_loaded)
+        self.signals.catalog_refreshed.connect(self._on_catalog_refreshed)
+
+        self.opencode_catalog = OpenCodeCatalogDiscovery()
 
         self.worker.on_probe_started = lambda cid: self.signals.probe_started.emit(cid)
         self.worker.on_probe_pending = lambda cid, el: self.signals.probe_pending.emit(cid, el)
@@ -103,13 +110,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         root_layout = QVBoxLayout(central_widget)
-        root_layout.setContentsMargins(4, 4, 4, 4)
-        root_layout.setSpacing(4)
+        root_layout.setContentsMargins(4, 2, 4, 2)
+        root_layout.setSpacing(2)
 
         # Header / Global Toolbar
         header_bar = QHBoxLayout()
-        header_bar.setContentsMargins(4, 2, 4, 2)
-        lbl_brand = QLabel("9router_WatchEdit — Unified Control Plane")
+        header_bar.setContentsMargins(2, 1, 2, 1)
+        lbl_brand = QLabel("9router_WatchEdit")
         lbl_brand.setStyleSheet(f"font-weight: bold; color: {COLOR_BORDER_HIGHLIGHT}; font-size: 12px;")
         header_bar.addWidget(lbl_brand)
         header_bar.addStretch()
@@ -118,45 +125,67 @@ class MainWindow(QMainWindow):
         self.security_indicator.clicked.connect(self._open_security_controls)
         header_bar.addWidget(self.security_indicator)
 
-        self.btn_open_presets = QPushButton("Presets Manager...")
+        self.btn_open_presets = QPushButton("Presets...")
         self.btn_open_presets.clicked.connect(self._open_presets_dialog)
         header_bar.addWidget(self.btn_open_presets)
         root_layout.addLayout(header_bar)
 
-        # Main Vertical Splitter: Top (Workspace) | Bottom (Activity + Inspector)
+        # Vertical Splitter: WatchView (top) | Tabs (bottom)
         self.vertical_splitter = QSplitter(Qt.Vertical)
 
-        # Top Horizontal Splitter: Left (WatchView 55%) | Right (ComboEditor 45%)
-        self.top_splitter = QSplitter(Qt.Horizontal)
+        # Top: Watch View (main health table)
         self.watch_view = WatchView(self.cache)
+        self.vertical_splitter.addWidget(self.watch_view)
+
+        # Bottom container: Activity strip + Tabs
+        bottom_widget = QWidget()
+        bottom_layout = QVBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(2)
+
+        # Activity Panel (compact strip)
+        self.activity = ActivityPanel()
+        self.activity.setMaximumHeight(52)
+        bottom_layout.addWidget(self.activity)
+
+        # Tab widget: Combo Editor + Inspector + OpenCode Catalog
+        self.bottom_tabs = QTabWidget()
         self.combo_editor = ComboEditorView(self.client, self.cache)
+        self.inspector = InspectorPanel()
         self.presets_view = PresetsView(self.preset_manager, self.cache)
 
-        self.top_splitter.addWidget(self.watch_view)
-        self.top_splitter.addWidget(self.combo_editor)
-        self.top_splitter.setStretchFactor(0, 55)
-        self.top_splitter.setStretchFactor(1, 45)
-        self.vertical_splitter.addWidget(self.top_splitter)
+        self.bottom_tabs.addTab(self.combo_editor, "Combo Editor")
+        self.bottom_tabs.addTab(self.inspector, "Inspector")
+        bottom_layout.addWidget(self.bottom_tabs, stretch=1)
 
-        # Bottom Horizontal Splitter: Left (ActivityPanel 60%) | Right (InspectorPanel 40%)
-        self.bottom_splitter = QSplitter(Qt.Horizontal)
-        self.activity = ActivityPanel()
-        self.inspector = InspectorPanel()
+        # Compact OpenCode Catalog section (SRC-004): separate panel below tabs,
+        # never alters the existing tab count.
+        self.opencode_catalog_panel = OpenCodeCatalogPanel(self.opencode_catalog)
+        self.opencode_catalog_panel.refresh_requested.connect(self._refresh_opencode_catalog_async)
+        self.opencode_catalog_panel.setMaximumHeight(180)
+        bottom_layout.addWidget(self.opencode_catalog_panel)
 
-        self.bottom_splitter.addWidget(self.activity)
-        self.bottom_splitter.addWidget(self.inspector)
-        self.bottom_splitter.setStretchFactor(0, 60)
-        self.bottom_splitter.setStretchFactor(1, 40)
-        self.vertical_splitter.addWidget(self.bottom_splitter)
+        self.vertical_splitter.addWidget(bottom_widget)
 
-        self.vertical_splitter.setStretchFactor(0, 65)
-        self.vertical_splitter.setStretchFactor(1, 35)
+        self.vertical_splitter.addWidget(bottom_widget)
+        self.vertical_splitter.setStretchFactor(0, 55)
+        self.vertical_splitter.setStretchFactor(1, 45)
         root_layout.addWidget(self.vertical_splitter, stretch=1)
 
         # Status Bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("9router_WatchEdit ready.")
+
+        # OpenCode catalog: automatic TTL-gated refresh; button forces.
+        # Do NOT startup-fetch here; reflect persisted LKG snapshot instantly.
+        from core.opencode_catalog import CATALOG_TTL_SECONDS
+        self._catalog_refresh_running = False
+        self._apply_catalog_state()
+        self._catalog_timer = QTimer(self)
+        self._catalog_timer.setInterval(max(60_000, int(CATALOG_TTL_SECONDS * 1000 / 3)))
+        self._catalog_timer.timeout.connect(lambda: self._refresh_opencode_catalog_async(force=False))
+        self._catalog_timer.start()
 
         # Wire Signals
         self.watch_view.scan_requested.connect(self.start_scan)
@@ -246,7 +275,7 @@ class MainWindow(QMainWindow):
         self._models_by_cid = {m.canonical_id: m for m in self.discovered_models}
         self.watch_view.set_models(self.discovered_models)
         self.combo_editor.set_available_models(self.discovered_models)
-        self.status_bar.showMessage(f"Discovered {len(self.discovered_models)} models across 9Router providers.")
+        self._show_discovery_status(len(self.discovered_models))
 
     @Slot(str)
     def _on_discovery_failed(self, err: str):
@@ -295,7 +324,65 @@ class MainWindow(QMainWindow):
         self.combo_editor.set_available_models(self.discovered_models)
         if self.combo_editor.current_combo:
             self.presets_view.set_current_live_combo(self.combo_editor.current_combo.models)
-        self.status_bar.showMessage(f"Discovered {len(self.discovered_models)} models across 9Router providers.")
+        self._show_discovery_status(len(self.discovered_models))
+
+    def _show_discovery_status(self, model_count: int) -> None:
+        """Show empty model catalog as degraded, never a PASS result."""
+        empty_count = len(self.discovery.routing_excluded_connections)
+        if empty_count:
+            self.status_bar.showMessage(
+                f"Discovered {model_count} models across 9Router providers. "
+                f"Models API: EMPTY (0 models) — {empty_count} provider(s) temporarily excluded from active routing; re-probe available."
+            )
+            return
+        self.status_bar.showMessage(f"Discovered {model_count} models across 9Router providers.")
+
+    # ------------------------------------------------ OpenCode catalog (SRC-004)
+    def _refresh_opencode_catalog_async(self, force: bool = True):
+        """Catalog fetch + CLI cross-check strictly off the GUI thread.
+
+        Single-flight: while one refresh runs the request is dropped; the
+        discovery layer additionally dedups concurrent calls internally."""
+        if self._catalog_refresh_running:
+            return
+        self._catalog_refresh_running = True
+        self.opencode_catalog_panel.set_refreshing(True)
+
+        def _task():
+            try:
+                result = self.opencode_catalog.refresh(force=force)
+                if result.get("fetch"):
+                    result["cli"] = self.opencode_catalog.cli_cross_check()
+            except Exception:
+                result = {"fresh": False, "status": "API_FAILED", "changed": False,
+                          "diff": None, "fetch": True, "error_class": "worker_error"}
+            finally:
+                self.signals.catalog_refreshed.emit(result)
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    @Slot(dict)
+    def _on_catalog_refreshed(self, result: dict):
+        self._catalog_refresh_running = False
+        self.opencode_catalog_panel.set_refreshing(False)
+        self._apply_catalog_state()
+        for ev in result.get("events") or []:
+            self.opencode_catalog_panel.append_events([ev])
+            if ev.get("type") == "newly_free":
+                self.status_bar.showMessage(ev.get("message", ""))
+        if result.get("status") == "API_FAILED":
+            reason = redact_text(str(result.get("error_class", "")))
+            self.status_bar.showMessage(f"OpenCode catalog refresh failed: {reason}")
+
+    def _apply_catalog_state(self):
+        """Mirror the discovery snapshot into the compact panel (no network)."""
+        catalog = self.opencode_catalog
+        self.opencode_catalog_panel.update_state(
+            catalog.models, catalog.last_success_at, catalog.ui_status()
+        )
+        self.opencode_catalog_panel.set_free_models(
+            [m for m in catalog.models if m.free_candidate]
+        )
 
     def start_scan(self, mode_str: str):
         if self.worker.is_running():

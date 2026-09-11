@@ -23,8 +23,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import getpass
+import hashlib
 import io
 import json
 import os
@@ -75,13 +77,24 @@ def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> 
         raise RuntimeError("No local private material found to back up")
 
     # 1. Stage plaintext entries ONLY in memory (never a plaintext temp file).
+    #    W2-003: entries are byte-preserving. Arbitrary binary sources (DPAPI
+    #    blobs) are base64-encoded with per-entry metadata; a restore path can
+    #    therefore reconstruct exact original bytes instead of lossy U+FFFD.
     entries: dict = {}
+    manifest_entries = []
     for p in sources:
         try:
             rel = str(p.relative_to(LOCALAPPDATA_DIR))
         except ValueError:
             rel = p.name
-        entries[rel] = p.read_bytes().decode("utf-8", "replace")
+        raw = p.read_bytes()
+        entries[rel] = base64.b64encode(raw).decode("ascii")
+        manifest_entries.append({
+            "path": rel,
+            "encoding": "base64",
+            "size_bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        })
 
     # 2. Encrypt the whole manifest with the vault construction.
     vault_path = out_dir / ".tmp_vault.vault"
@@ -105,14 +118,63 @@ def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> 
         zf.writestr("manifest.json", json.dumps({
             "created": datetime.datetime.now().isoformat(),
             "entry_count": len(entries),
-            "entries": sorted(entries.keys()),
+            "entries": manifest_entries,
             "crypto": "argon2id + aes-256-gcm",
+            "encoding": "base64 (byte-preserving; see entries[].sha256/size_bytes)",
         }, indent=2))
     vault_path.unlink()
 
     from core.secret_store import restrict_to_current_user
     restrict_to_current_user(out_dir)
     return out_path
+
+
+def extract_private_backup(wvault_path: Path, password: str, out_dir: Path) -> List[Path]:
+    """Restores a .wvault backup. Fails CLOSED on any hash/length mismatch.
+
+    W2-003: entries are base64 + sha256 + size verified, so restore is
+    byte-exact and refuses truncated or tampered archives.
+    """
+    wvault_path = Path(wvault_path)
+    out_dir = Path(out_dir).resolve()
+    repo_root = REPO_ROOT.resolve()
+    if str(out_dir).startswith(str(repo_root) + os.sep) or out_dir == repo_root:
+        raise ValueError("Restore destination must be OUTSIDE the repository")
+    with zipfile.ZipFile(wvault_path) as zf:
+        payload = zf.read("payload.vault")
+        manifest = json.loads(zf.read("manifest.json"))
+    tmp_vault = out_dir / ".tmp_extract.vault"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_vault.write_bytes(payload)
+    try:
+        vault = VaultStore(tmp_vault)
+        secrets = vault.load(password)
+    finally:
+        tmp_vault.unlink(missing_ok=True)
+
+    entries_meta = {e["path"]: e for e in manifest.get("entries", [])}
+    restored: List[Path] = []
+    for rel, b64_value in secrets.items():
+        meta = entries_meta.get(rel)
+        if meta is None:
+            raise ValueError(f"Backup entry not in manifest: {rel}")
+        if meta.get("encoding") != "base64":
+            raise ValueError(f"Unsupported entry encoding for {rel}: {meta.get('encoding')!r}")
+        raw = base64.b64decode(b64_value.encode("ascii"), validate=True)
+        if len(raw) != int(meta.get("size_bytes", -1)):
+            raise ValueError(f"Length mismatch for {rel}: backup is corrupted")
+        if hashlib.sha256(raw).hexdigest() != meta.get("sha256"):
+            raise ValueError(f"SHA-256 mismatch for {rel}: backup is corrupted")
+        target = (out_dir / rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        try:
+            from core.secret_store import restrict_to_current_user
+            restrict_to_current_user(target)
+        except Exception:
+            pass  # ACL hardening is defense-in-depth; content verification already passed
+        restored.append(target)
+    return restored
 
 
 class _NoEchoArgumentParser(argparse.ArgumentParser):

@@ -667,9 +667,9 @@ def test_discovery_provenance_and_live_status_tracking():
         {"id": "conn-2", "name": "Broken Provider", "provider": "broken", "isActive": True, "providerSpecificData": {"prefix": "brk"}},
     ]
     client.get_provider_nodes = lambda: []
-    client.get_kv = lambda: [
-        ("oai", '["gpt-4o", "gpt-4o-mini", "omitted-model"]'),
-        ("brk", '["broken-model-1"]'),
+    client.get_kv_scoped = lambda: [
+        ("customModels", "oai", '["gpt-4o", "gpt-4o-mini", "omitted-model"]'),
+        ("customModels", "brk", '["broken-model-1"]'),
     ]
     client.get_catalog_models = lambda: [
         {"provider": "openai", "model": "gpt-4o", "name": "GPT-4o Omnimodel"},

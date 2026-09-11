@@ -1023,25 +1023,30 @@ function Dispose-ProbeTasks {
     }
 }
 
+function Clear-ScanSecretState {
+    # Call only after catalog/probe runspaces have stopped and been disposed.
+    $script:ScanApiKey = ""
+    $KeyBox.Clear()
+}
+
 function Stop-CurrentScan {
     param([bool]$UserRequested = $false)
 
-    if (-not $script:Scanning) {
-        if ($UserRequested) {
-            Set-Status "IDLE  |  Nothing is running."
-        }
-
-        return
-    }
+    $wasScanning = $script:Scanning
 
     Dispose-CatalogTask
     Dispose-ProbeTasks
 
     $script:Scanning = $false
-    $script:ScanApiKey = ""
+    Clear-ScanSecretState
 
     if ($UserRequested) {
-        Set-Status "STOPPED  |  Checked $script:CheckedModels/$script:TotalModels. Live $script:LiveModels."
+        if ($wasScanning) {
+            Set-Status "STOPPED  |  Checked $script:CheckedModels/$script:TotalModels. Live $script:LiveModels."
+        }
+        else {
+            Set-Status "IDLE  |  Nothing is running."
+        }
     }
 }
 
@@ -1054,7 +1059,7 @@ function Start-ProbePool {
     Update-Counter
 
     if ($script:TotalModels -eq 0) {
-        $script:Scanning = $false
+        Stop-CurrentScan
         Set-Status "DONE  |  No likely text models were returned." "error"
         return
     }
@@ -1071,6 +1076,14 @@ function Start-ProbePool {
 
     foreach ($model in $Models) {
         $ps = [System.Management.Automation.PowerShell]::Create()
+        # Track before configuration/BeginInvoke so startup failures can
+        # dispose this pipeline as well as previously started probes.
+        $task = [PSCustomObject]@{
+            Model      = [string]$model
+            PowerShell = $ps
+            Handle     = $null
+        }
+        $null = $script:Tasks.Add($task)
         $ps.RunspacePool = $script:RunspacePool
 
         $null = $ps.AddScript($probeText)
@@ -1080,15 +1093,7 @@ function Start-ProbePool {
         $null = $ps.AddArgument($FastTimeoutSec)
         $null = $ps.AddArgument($SlowTimeoutSec)
 
-        $handle = $ps.BeginInvoke()
-
-        $null = $script:Tasks.Add(
-            [PSCustomObject]@{
-                Model      = [string]$model
-                PowerShell = $ps
-                Handle     = $handle
-            }
-        )
+        $task.Handle = $ps.BeginInvoke()
     }
 
     Set-Status "SCANNING  |  0/$script:TotalModels checked. Live 0."
@@ -1101,9 +1106,20 @@ function Start-CatalogScan {
     }
 
     try {
+        Start-CatalogScanCore
+    }
+    catch {
+        Stop-CurrentScan
+        Set-Status "SCAN ERROR  |  Unable to start scan." "error"
+    }
+}
+
+function Start-CatalogScanCore {
+    try {
         $apiBase = Resolve-ApiBase -InputValue $ProviderBox.Text
     }
     catch {
+        Stop-CurrentScan
         Set-Status ("INPUT ERROR  |  " + $_.Exception.Message) "error"
         $ProviderBox.Focus()
         return
@@ -1112,6 +1128,7 @@ function Start-CatalogScan {
     $apiKey = $KeyBox.Password.Trim()
 
     if ([string]::IsNullOrWhiteSpace($apiKey)) {
+        Stop-CurrentScan
         Set-Status "INPUT ERROR  |  API key is empty." "error"
         $KeyBox.Focus()
         return
@@ -1156,9 +1173,7 @@ function Process-CatalogCompletion {
     }
     catch {
         $message = $_.Exception.Message
-        Dispose-CatalogTask
-        $script:Scanning = $false
-        $script:ScanApiKey = ""
+        Stop-CurrentScan
         Set-Status ("CATALOG ERROR  |  " + $message) "error"
         return
     }
@@ -1166,8 +1181,7 @@ function Process-CatalogCompletion {
     Dispose-CatalogTask
 
     if ($items.Count -eq 0) {
-        $script:Scanning = $false
-        $script:ScanApiKey = ""
+        Stop-CurrentScan
         Set-Status "CATALOG ERROR  |  Provider returned no catalog result." "error"
         return
     }
@@ -1175,8 +1189,7 @@ function Process-CatalogCompletion {
     $catalog = $items[0]
 
     if (-not [bool]$catalog.Success) {
-        $script:Scanning = $false
-        $script:ScanApiKey = ""
+        Stop-CurrentScan
 
         $statusCode = [int]$catalog.Status
         $detail = [string]$catalog.Error
@@ -1191,8 +1204,7 @@ function Process-CatalogCompletion {
     $models = @($catalog.Models)
 
     if ($models.Count -eq 0) {
-        $script:Scanning = $false
-        $script:ScanApiKey = ""
+        Stop-CurrentScan
         Set-Status "DONE  |  Catalog contains no likely text models." "error"
         return
     }
@@ -1267,24 +1279,7 @@ function Process-ProbeCompletions {
         $script:CheckedModels -ge $script:TotalModels -and
         $script:Tasks.Count -eq 0
     ) {
-        if ($null -ne $script:RunspacePool) {
-            try {
-                $script:RunspacePool.Close()
-            }
-            catch {
-            }
-
-            try {
-                $script:RunspacePool.Dispose()
-            }
-            catch {
-            }
-
-            $script:RunspacePool = $null
-        }
-
-        $script:Scanning = $false
-        $script:ScanApiKey = ""
+        Stop-CurrentScan
 
         Set-Status (
             "DONE  |  Checked $script:CheckedModels models. Live $script:LiveModels."
@@ -1297,12 +1292,18 @@ $timer.Add_Tick({
         return
     }
 
-    if ($null -ne $script:CatalogPowerShell) {
-        Process-CatalogCompletion
-        return
-    }
+    try {
+        if ($null -ne $script:CatalogPowerShell) {
+            Process-CatalogCompletion
+            return
+        }
 
-    Process-ProbeCompletions
+        Process-ProbeCompletions
+    }
+    catch {
+        Stop-CurrentScan
+        Set-Status "SCAN ERROR  |  Scan terminated." "error"
+    }
 })
 
 $ScanButton.Add_Click({
@@ -1393,4 +1394,10 @@ $window.Add_Closing({
     }
 })
 
-$null = $window.ShowDialog()
+try {
+    $null = $window.ShowDialog()
+}
+finally {
+    Stop-CurrentScan
+    $timer.Stop()
+}
