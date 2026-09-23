@@ -119,6 +119,22 @@ TEST_IDENTIFIER_RE = re.compile(r'^test_[a-z0-9_]+$')
 # word "ticket"/"credential" in audit prose.
 SAIOPS_OP_ID_RE = re.compile(r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9a-f]{32}$')
 
+# The BARE event marker form `[op: <32 lowercase hex>]` (the `op:` field every
+# canonical SAIOPS LOG line carries). Same bookkeeping material as above, but
+# without the opword prefix, so SAIOPS_OP_ID_RE never saw it. A LOG line whose
+# prose also says "secret"/"token" therefore reddened every tree scan (T-1
+# DONE_WHEN / SRC-001:R0015). Pure 32-lowercase-hex immediately after `[op: `
+# is that marker and nothing else.
+_SAIOPS_OP_HEX_RE = re.compile(r'\A[0-9a-f]{32}\Z')
+_SAIOPS_OP_MARKER_PREFIX_RE = re.compile(r'\[op:\s*\Z')
+
+
+def _is_saipen_op_marker(line: str, token: str, start: int) -> bool:
+    """True iff `token` is the bare SAIOPS op-id in a `[op: <hex>]` marker."""
+    if not _SAIOPS_OP_HEX_RE.match(token):
+        return False
+    return bool(_SAIOPS_OP_MARKER_PREFIX_RE.search(line[:start]))
+
 BINARY_SUFFIXES = {
     ".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", ".db-wal", ".db-shm", ".tgz", ".zip", ".gz",
     ".png", ".jpg", ".jpeg", ".ico", ".exe", ".dll", ".pyd", ".pdf", ".woff",
@@ -297,7 +313,12 @@ def _scan_text(text: str, path: Path, findings: List[Finding], structured: bool 
                 # snake_case test identifiers); require digit+letter mix:
                 # plain code identifiers (camelCase function names near the
                 # word 'credentials') are not secrets
-                if BENIGN_TOKEN_RE.search(tok) or TEST_IDENTIFIER_RE.match(tok) or SAIOPS_OP_ID_RE.match(tok):
+                if (
+                    BENIGN_TOKEN_RE.search(tok)
+                    or TEST_IDENTIFIER_RE.match(tok)
+                    or SAIOPS_OP_ID_RE.match(tok)
+                    or _is_saipen_op_marker(line, tok, m.start())
+                ):
                     continue
                 if (not _is_placeholder(tok) and _entropy(tok) >= 3.8
                         and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok)):
@@ -381,6 +402,10 @@ def scan_tree(root: Path, include: Optional[Iterable[Path]] = None) -> List[Find
         return findings
     for p in sorted(root.rglob("*")):
         if p.is_file():
+            rel = p.relative_to(root) if p.is_relative_to(root) else p
+            parts = rel.parts
+            if ".saipen" in parts[:-1]:
+                continue
             findings.extend(scan_file(p, root))
     return findings
 

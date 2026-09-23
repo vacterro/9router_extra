@@ -1,6 +1,6 @@
 # 9Router Extra / Scanner & Integration Suite
 
-Version: 0.1.0
+Version: **v0.1.0**
 Project: 9router_extra
 Path: `V:\___VAC\__K\__CODE\_PY\_9router_extra\`
 
@@ -32,6 +32,31 @@ This repository contains extensions, tools, state backups, and patches for 9Rout
 - `backup/`
   - `export_state.js` & `restore_state.js` - SQLite state backup and sync tools
     (private state now targets `%LOCALAPPDATA%\9router_WatchEdit\backups\private\`, never this repository).
+
+## Running the 9Router source tests (vitest invocation trap, T-21)
+The Next.js dashboard source lives in `%APPDATA%\9router\source`. Its vitest
+path aliases (`@/` → `src`, `open-sse` → `open-sse`) are defined ONLY in
+`tests/vitest.config.js`.
+
+**Do NOT invoke the binary from the source root:**
+```powershell
+# WRONG: bypasses tests/vitest.config.js, every "@/..." import fails
+.\tests\node_modules\.bin\vitest.cmd run tests/unit/model-test-routing.test.js
+#   -> Error: Cannot find package '@/shared/constants/config' imported from
+#      src/app/api/models/test/ping.js
+```
+
+Use the config-aware invocation instead:
+```powershell
+# RIGHT: loads tests/vitest.config.js (aliases resolve)
+npm --prefix tests test -- unit/model-test-routing.test.js
+```
+
+A root-level `vitest.config.js` that re-exports the tests config also makes the
+root binary work; it is kept in the source tree so both invocations agree.
+`tests/unit/model-routing.test.js` has an unrelated pre-existing `EPERM` on
+`os.tmpdir()` teardown in this environment — it fails identically under both
+invocations and is not an alias problem.
 
 ## Security model
 This repository is secret-free and safe to hand to external coding agents.

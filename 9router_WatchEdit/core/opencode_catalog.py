@@ -50,6 +50,16 @@ HTTP_TIMEOUT_SECONDS = 8.0
 
 SNAPSHOT_SCHEMA_VERSION = 2
 
+# W2-006: snapshot load/persistence outcome, never implied. Freshness of the
+# NETWORK fetch and durability of the snapshot are separate facts.
+SNAPSHOT_LOADED = "LOADED"              # valid snapshot read
+SNAPSHOT_ABSENT = "ABSENT"              # no snapshot file at all
+SNAPSHOT_UNREADABLE = "UNREADABLE"      # exists but could not be read/parsed
+SNAPSHOT_SCHEMA_MISMATCH = "SCHEMA_MISMATCH"  # old/incomplete shape, not trusted
+
+API_DURABILITY_OK = "DURABLE"           # successful fetch AND durable snapshot
+API_DURABILITY_FAILED = "NON_DURABLE"   # successful fetch, snapshot not persisted
+
 _SNAPSHOT_SCHEMA_KEYS = {
     "schema_version", "fetched_at", "models", "free_ids", "statuses"
 }
@@ -240,18 +250,37 @@ class OpenCodeCatalogDiscovery:
         self.last_diff: Optional[CatalogDiff] = None
         self.cli_result: Optional[Dict[str, object]] = None
         self.previous_models: List[ZenCatalogModel] = []
+        # W2-006 explicit snapshot-load state.
+        self.snapshot_load_state: str = SNAPSHOT_ABSENT
+        self.snapshot_load_error: str = ""
         self._load_snapshot()
 
     # ------------------------------------------------------------ snapshot io
     def _load_snapshot(self) -> None:
+        self.snapshot_load_state = SNAPSHOT_ABSENT
+        self.snapshot_load_error = ""
+        if not self.snapshot_file.exists():
+            return
         try:
             raw = self.snapshot_file.read_text(encoding="utf-8")
             data = json.loads(raw)
+        except (OSError, ValueError) as ex:
+            # W2-006: an unreadable/corrupt snapshot is NOT "first load". Surface
+            # it and reset to empty WITHOUT emitting false change events.
+            self.snapshot_load_state = SNAPSHOT_UNREADABLE
+            self.snapshot_load_error = f"{type(ex).__name__}: {ex}"
+            self._reset_empty_after_load_failure()
+            return
+        try:
             if not isinstance(data, dict) or not _SNAPSHOT_SCHEMA_KEYS.issubset(data):
+                self.snapshot_load_state = SNAPSHOT_SCHEMA_MISMATCH
+                self.snapshot_load_error = "snapshot shape incomplete"
+                self._reset_empty_after_load_failure()
                 return
             if data.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
-                # Old/incomplete snapshot: not trusted as diff baseline; keep
-                # nothing rather than mis-diffing against an unknown shape.
+                self.snapshot_load_state = SNAPSHOT_SCHEMA_MISMATCH
+                self.snapshot_load_error = f"schema_version={data.get('schema_version')!r}"
+                self._reset_empty_after_load_failure()
                 return
             models = []
             for m in data.get("models", []):
@@ -287,19 +316,32 @@ class OpenCodeCatalogDiscovery:
             cli = data.get("cli_result")
             if isinstance(cli, dict) and isinstance(cli.get("status"), str):
                 self.cli_result = cli
-        except Exception:
-            # unreadable/corrupt snapshot: start empty, never crash, never
-            # treat as a catalog failure (no fetch has been attempted yet).
-            self.models = []
-            self.free_ids = []
-            self.statuses = {}
-            self.last_success_at = ""
-            self.previous_models = []
-            self.last_diff = None
-            self.last_failure = {}
-            self.cli_result = None
+            self.snapshot_load_state = SNAPSHOT_LOADED
+        except Exception as ex:
+            # Malformed content inside an otherwise readable file: surface it,
+            # reset to empty, never crash and never emit false change events.
+            self.snapshot_load_state = SNAPSHOT_UNREADABLE
+            self.snapshot_load_error = f"{type(ex).__name__}: {ex}"
+            self._reset_empty_after_load_failure()
 
-    def _save_snapshot(self) -> None:
+    def _reset_empty_after_load_failure(self) -> None:
+        self.models = []
+        self.free_ids = []
+        self.statuses = {}
+        self.last_success_at = ""
+        self.previous_models = []
+        self.last_diff = None
+        self.last_failure = {}
+        self.cli_result = None
+
+    def _save_snapshot(self) -> bool:
+        """Atomically persist the snapshot. Returns True on verified success.
+
+        W2-006: persistence outcome is EXPLICIT. Returns False after a
+        mkdir/write/replace failure instead of swallowing it, so refresh can
+        expose a non-durable result rather than claiming an indistinguishable
+        normal API_OK.
+        """
         doc = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "fetched_at": self.last_success_at,
@@ -310,15 +352,22 @@ class OpenCodeCatalogDiscovery:
             "last_diff": asdict(self.last_diff) if self.last_diff else None,
             "last_failure": self.last_failure,
         }
+        tmp = self.snapshot_file.with_suffix(".tmp")
         try:
             self.snapshot_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.snapshot_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
             tmp.replace(self.snapshot_file)
         except Exception:
-            # Persistence failure must not surface as a catalog failure: the
-            # in-memory snapshot remains authoritative for this session.
-            pass
+            # Never leave a stray temp; the in-memory snapshot remains
+            # authoritative for this session but the LACK OF DURABILITY is
+            # reported by the caller.
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            return False
+        return True
 
     # ------------------------------------------------------------ public api
     @property
@@ -416,11 +465,13 @@ class OpenCodeCatalogDiscovery:
         self.last_success_at = _utc_now_iso()
         self.statuses["api"] = API_OK
         self.last_diff = diff if changed else None
-        self._save_snapshot()
+        durable = self._save_snapshot()
 
         status = CATALOG_CHANGED if changed else API_OK
         result = {"fresh": True, "status": status, "changed": changed,
-                  "diff": diff if changed else None, "fetch": True}
+                  "diff": diff if changed else None, "fetch": True,
+                  "durable": durable,
+                  "durability": API_DURABILITY_OK if durable else API_DURABILITY_FAILED}
         if changed:
             result["events"] = catalog_events(diff)
         return result

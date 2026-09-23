@@ -25,10 +25,17 @@ class AvailabilityState(str, Enum):
     TIMEOUT = "CONNECT_TIMEOUT"  # Backward-compatible enum alias.
     PROVIDER_ERROR = "PROVIDER_ERROR"
     TEMP_ERROR = "PROVIDER_ERROR"  # Backward-compatible enum alias.
+    # CORE-003: ROUTE_ERROR and MODEL_MISSING are DISTINCT evidence categories
+    # (the classifier explicitly separates a naked route 404 from a semantic
+    # model-missing 404). Collapsing them onto one value corrupted default
+    # counter attribution (EvidenceRecord(ROUTE_ERROR) incremented
+    # consecutive_model_missing) and made equality-based tests unable to prove
+    # the distinction. ENDPOINT_OR_MODEL_INVALID stays the genuinely broad
+    # state, used only when evidence cannot distinguish the cause.
     ENDPOINT_OR_MODEL_INVALID = "ENDPOINT_OR_MODEL_INVALID"
-    ROUTE_ERROR = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    ROUTE_ERROR = "ROUTE_ERROR"
     MODEL_INVALID = "MODEL_INVALID"
-    MODEL_MISSING = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_MISSING = "MODEL_MISSING"
     MODEL_GONE = "MODEL_GONE"
     ROUTER_DEGRADED = "ROUTER_DEGRADED"
     DNS_FAILURE = "DNS_FAILURE"
@@ -36,6 +43,11 @@ class AvailabilityState(str, Enum):
     WAF_BLOCKED = "WAF_BLOCKED"
     BROWSER_CHALLENGE = "BROWSER_CHALLENGE"
     MODEL_DISCOVERY_UNAVAILABLE = "MODEL_DISCOVERY_UNAVAILABLE"
+    # OCF-001: the public model may exist and be free, but the provider refuses
+    # arbitrary third-party HTTP clients (e.g. OpenCode's free tier). This is
+    # NOT an API-key rejection, NOT a dead model, and NOT a reason to delete the
+    # catalog row -- the executable path is the official local client bridge.
+    CLIENT_BOUND_FREE_TIER = "CLIENT_BOUND_FREE_TIER"
     DEAD = "DEAD"
     UNKNOWN = "UNKNOWN"
 
@@ -54,9 +66,9 @@ class HealthState(str, Enum):
     PROVIDER_ERROR = "PROVIDER_ERROR"
     TEMP_ERROR = "PROVIDER_ERROR"  # Backward-compatible enum alias.
     ENDPOINT_OR_MODEL_INVALID = "ENDPOINT_OR_MODEL_INVALID"
-    ROUTE_ERROR = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    ROUTE_ERROR = "ROUTE_ERROR"
     MODEL_INVALID = "MODEL_INVALID"
-    MODEL_MISSING = "ENDPOINT_OR_MODEL_INVALID"  # Backward-compatible enum alias.
+    MODEL_MISSING = "MODEL_MISSING"
     MODEL_GONE = "MODEL_GONE"
     ROUTER_DEGRADED = "ROUTER_DEGRADED"
     DNS_FAILURE = "DNS_FAILURE"
@@ -64,6 +76,7 @@ class HealthState(str, Enum):
     WAF_BLOCKED = "WAF_BLOCKED"
     BROWSER_CHALLENGE = "BROWSER_CHALLENGE"
     MODEL_DISCOVERY_UNAVAILABLE = "MODEL_DISCOVERY_UNAVAILABLE"
+    CLIENT_BOUND_FREE_TIER = "CLIENT_BOUND_FREE_TIER"
     DEAD = "DEAD"
     UNKNOWN = "UNKNOWN"
     FREE_USE = "FREE/USE"
@@ -218,6 +231,8 @@ class EvidenceRecord:
         self.raw_error = raw_error
         if counters is None:
             c = EvidenceCounters()
+            # CORE-003: MODEL_MISSING and ROUTE_ERROR are now distinct values, so
+            # each branch attributes exactly its own counter (no alias collision).
             if self.availability == AvailabilityState.MODEL_MISSING:
                 c.consecutive_model_missing = 1
             elif self.availability == AvailabilityState.TIMEOUT:
@@ -305,8 +320,11 @@ _LEGACY_AVAILABILITY_VALUES = {
     "RATE LIMIT": AvailabilityState.RATE_LIMITED,
     "TIMEOUT": AvailabilityState.CONNECT_TIMEOUT,
     "TEMP ERROR": AvailabilityState.PROVIDER_ERROR,
-    "ROUTE ERROR": AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
-    "MODEL MISSING": AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+    # CORE-003: legacy persisted broad values must NOT be guessed into a subtype
+    # (old data lacks the semantic-vs-naked-404 evidence). Only the explicitly
+    # labelled legacy strings map; the broad canonical value stays broad.
+    "ROUTE ERROR": AvailabilityState.ROUTE_ERROR,
+    "MODEL MISSING": AvailabilityState.MODEL_MISSING,
 }
 
 
@@ -363,6 +381,38 @@ SEMANTIC_MODEL_MISSING_KEYWORDS = re.compile(
     r'model is not supported|requested (model|entity).*not found|cannot find model|'
     r'unknown model|no such model|model_missing|invalid_model|entity.*not found)'
 )
+
+# OCF-001: client-bound free-tier evidence. The provider advertises a free
+# model but rejects arbitrary HTTP clients; only its own official client may
+# call it. Matched BEFORE the generic 403/auth handling so the condition is
+# never mislabelled as INVALID_API_KEY or as a dead model.
+CLIENT_BOUND_FREE_TIER_KEYWORDS = re.compile(
+    r'(?i)(can only be used from within opencode|freetiererror|'
+    r'client[_-]?bound free tier|free tier can only be used)'
+)
+
+
+def is_client_bound_free_tier(
+    status_code: int = 0,
+    raw_body: str = "",
+    parsed_json: Optional[Dict[str, Any]] = None,
+    error_code: str = "",
+    error_type: str = "",
+    error_msg: str = "",
+) -> bool:
+    """Detect a client-bound free-tier rejection from explicit evidence only."""
+    blob = " ".join(str(part) for part in (raw_body, error_code, error_type, error_msg)).lower()
+    if parsed_json is not None:
+        try:
+            blob += " " + json.dumps(parsed_json, ensure_ascii=False).lower()
+        except (TypeError, ValueError):
+            pass
+    if not CLIENT_BOUND_FREE_TIER_KEYWORDS.search(blob):
+        return False
+    # A client-bound rejection is an access-shape failure: 403/401/503 wrappers
+    # are all accepted evidence once the free-tier marker is present.
+    return status_code in (0, 401, 403, 500, 502, 503, 504)
+
 
 def is_provider_or_model_known_free(provider_prefix: str, model_id: str) -> bool:
     p = (provider_prefix or "").lower()
@@ -648,6 +698,26 @@ def classify_probe_result(
             counters=counters,
         )
 
+    # 4b. OCF-001 client-bound free tier: a valid free catalog model that only
+    #     its own official client may call. Classified before 403/AUTH handling,
+    #     with no auth/model-missing streak attribution and no DEAD escalation.
+    if is_client_bound_free_tier(status_code, clean_body, parsed_json,
+                                 error_code=error_code, error_type=error_type,
+                                 error_msg=error_msg):
+        return EvidenceRecord(
+            availability=AvailabilityState.CLIENT_BOUND_FREE_TIER,
+            cost=CostState.FREE,
+            confidence=Confidence.CONFIG_ERROR,
+            status_code=status_code or 403,
+            latency_ms=latency_ms,
+            error_code=error_code or "CLIENT_BOUND_FREE_TIER",
+            reason=("Provider advertises this model as free but refuses arbitrary "
+                    "HTTP clients; the official local client path (ocf bridge) is required."),
+            raw_error=clean_body[:300],
+            counters=counters,
+            note="client_bound_free_tier",
+        )
+
     # 5. Distinguish credential rejection from a valid but forbidden request.
     if status_code == 403:
         return EvidenceRecord(
@@ -925,7 +995,14 @@ def classify_provider_state(
     reachability = _classify_reachability(completion, models_status_code)
     auth = _classify_auth(completion, models_status_code)
     model_state = completion.availability
-    if model_state == AvailabilityState.ENDPOINT_OR_MODEL_INVALID and models_status_code == 200:
+    if model_state in (
+        AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+        AvailabilityState.ROUTE_ERROR,
+        AvailabilityState.MODEL_MISSING,
+    ) and models_status_code == 200:
+        # Provider reachable (catalog OK) but the completion route/model is
+        # invalid -> MODEL_INVALID. CORE-003: the distinct route/model-missing
+        # values are part of the same family here.
         model_state = AvailabilityState.MODEL_INVALID
 
     provider_state = completion.availability
@@ -933,6 +1010,8 @@ def classify_provider_state(
         AvailabilityState.LIVE,
         AvailabilityState.MODEL_INVALID,
         AvailabilityState.ENDPOINT_OR_MODEL_INVALID,
+        AvailabilityState.ROUTE_ERROR,
+        AvailabilityState.MODEL_MISSING,
     ) and models_status_code == 200:
         provider_state = AvailabilityState.LIVE
     elif completion.availability == AvailabilityState.LIVE:

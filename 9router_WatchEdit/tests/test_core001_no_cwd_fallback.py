@@ -7,6 +7,8 @@ Design contract: when no valid private root exists, config reports
 PRIVATE_STORAGE_AVAILABLE=False and derives every private path under an
 os.devnull sentinel — absolute operations (mkdir/write) fail with OSError,
 exists() is False for derived files, and nothing may appear in the source tree.
+W2-005: those failed writes are also EXPLICIT — HealthCache.save() raises
+HealthCachePersistenceError instead of swallowing the failure.
 """
 import json
 import os
@@ -75,13 +77,26 @@ before = sorted(str(p) for p in Path.cwd().rglob("*"))
 import config, core.security, core.secret_store  # noqa: F401
 import core.history, core.combo_manager  # noqa: F401
 # Exercise the writers that would silently land in CWD if paths were relative
-from core.history import HealthCache
-from core.combo_manager import PresetManager
-HealthCache().save()
-PresetManager().save()
+from core.history import HealthCache, HealthCachePersistenceError
+from core.combo_manager import PresetManager, PresetPersistenceError
+# W2-005: with no valid private root the health cache MUST report the failed
+# persistence explicitly (never a silent success). CORE-002 extends the same
+# contract to preset persistence. The CORE-001 guarantee is unaffected: nothing
+# may appear in the source tree either way.
+cache_persistence_error = None
+try:
+    HealthCache().save()
+except HealthCachePersistenceError as ex:
+    cache_persistence_error = ex.stage
+preset_persistence_error = None
+try:
+    PresetManager().save()
+except PresetPersistenceError as ex:
+    preset_persistence_error = ex.stage
 after = sorted(str(p) for p in Path.cwd().rglob("*"))
 new = [p for p in after if p not in set(before)]
-print(json.dumps({"new_paths": new}))
+print(json.dumps({"new_paths": new, "cache_persistence_error": cache_persistence_error,
+                  "preset_persistence_error": preset_persistence_error}))
 '''
 
 
@@ -112,6 +127,11 @@ def test_missing_env_degrades_to_unavailable_sentinel(cwd):
 def test_missing_env_no_files_created_in_tree(cwd):
     out = _run(TREE_GUARD, cwd)
     assert out["new_paths"] == [], f"imports/writes created paths under {cwd}: {out['new_paths']}"
+    # W2-005: unavailable private storage is an EXPLICIT persistence failure
+    # (raised by HealthCache.save), never a silent no-op reported as success.
+    assert out["cache_persistence_error"] is not None
+    # CORE-002: preset persistence obeys the same explicit contract.
+    assert out["preset_persistence_error"] is not None
 
 
 def test_relative_watchedit_data_dir_rejected(tmp_path):

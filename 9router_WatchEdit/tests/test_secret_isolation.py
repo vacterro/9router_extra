@@ -250,6 +250,31 @@ class TestScannerAndExports:
         }), encoding="utf-8")
         assert scan_file(fixture, tmp_path) == []
 
+    def test_saipen_op_marker_is_not_a_finding_but_bare_hex_is(self, tmp_path):
+        """Precision (T-1 / SRC-001:R0015): the bare `[op: <32 lower hex>]`
+        SAIOPS marker is protocol bookkeeping, not a credential, even when its
+        LOG line also contains the word 'secret'/'token'. A 32-hex value NOT in
+        that marker position stays flaggable."""
+        from core.secret_scanner import scan_file
+
+        # Built at runtime so this test file itself stays free of a bare
+        # 32-hex literal (which the whole-tree scan must flag).
+        op_hex = "4d81c0e5a29347f6b0d8e21c95a7f30" + "4"
+
+        marker = tmp_path / "LOG.md"
+        marker.write_text(
+            f"- 11.09.26 [E-109] [op: {op_hex}] "
+            "RUN: secret gate CLEAN, token rotation done\n",
+            encoding="utf-8",
+        )
+        assert scan_file(marker, tmp_path) == []
+
+        # Negative control: the SAME hex outside the [op: ] marker is flagged.
+        bare = tmp_path / "bare.md"
+        bare.write_text(f"token = {op_hex} secret\n", encoding="utf-8")
+        reasons = {f.reason for f in scan_file(bare, tmp_path)}
+        assert "high_entropy_near_credential_word" in reasons
+
     def test_sanitize_tool_never_touches_source(self, tmp_path):
         from sanitize_9router_state import sanitize_export
         fake_live = ("s" + "k-") + "live" + "1234567890" + "abcdef"

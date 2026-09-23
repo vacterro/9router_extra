@@ -98,6 +98,10 @@ def test_remove_dead_models(tmp_path):
 def test_preset_manager(tmp_path):
     pm = PresetManager(presets_file=tmp_path / "presets.json")
     assert "SAIFREN_FREE" in pm.presets
+    
+    # Verify SWE-1.6 Slow is in SAIFREN_FREE preset
+    assert "cog/swe-1.6-slow" in pm.presets["SAIFREN_FREE"].models
+    assert pm.presets["SAIFREN_FREE"].models[0] == "cog/swe-1.6-slow"
 
     pm.save_preset("MY_TEST_PRESET", ["ag/gemini-3.8-flash-high", "wb/hy3"], "Test description")
     assert "MY_TEST_PRESET" in pm.presets
@@ -106,3 +110,4 @@ def test_preset_manager(tmp_path):
     # Re-load from disk
     pm2 = PresetManager(presets_file=tmp_path / "presets.json")
     assert "MY_TEST_PRESET" in pm2.presets
+    assert "cog/swe-1.6-slow" in pm2.presets["SAIFREN_FREE"].models

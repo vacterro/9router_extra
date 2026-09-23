@@ -97,7 +97,10 @@ def test_gate_c_naked_404_is_route_error():
         raw_body="Cannot POST /v1/chat/completions",
     )
     assert res.availability == AvailabilityState.ROUTE_ERROR
-    assert res.availability == AvailabilityState.ENDPOINT_OR_MODEL_INVALID
+    # CORE-003: ROUTE_ERROR and MODEL_MISSING are DISTINCT values now, so the
+    # naked-404 vs semantic-model-missing distinction is proven by identity.
+    assert res.availability != AvailabilityState.MODEL_MISSING
+    assert res.availability != AvailabilityState.ENDPOINT_OR_MODEL_INVALID
     assert res.availability != AvailabilityState.MODEL_INVALID
     assert res.counters.consecutive_route_error == 1
     assert res.counters.consecutive_model_missing == 0
@@ -117,6 +120,9 @@ def test_gate_d_unknown_successful_provider_remains_use_unknown():
     assert res.state == "USE/?"
 
 # Gate E: Cancellation terminates scanner immediately
+# W2-001 update: cancellation is session-specific. A cancel request with no
+# active session is a rejected no-op (never pre-cancels a future session);
+# cancelling the active session terminates it promptly.
 def test_gate_e_scanner_cancellation(tmp_path):
     client = RouterClient()
     cache = HealthCache(cache_file=tmp_path / "cache.json")
@@ -128,11 +134,27 @@ def test_gate_e_scanner_cancellation(tmp_path):
         DiscoveredModel("p/m3", "p", "p", "c1", "m3", "m3"),
     ]
 
-    worker.cancel()
-    assert worker.is_cancelled() is True
+    # No active session: a bare cancel must NOT pre-cancel a future session.
+    assert worker.cancel() is False
+    assert worker.session_controller.session_counter == 0
 
-    worker.run_scan(models, ScanMode.FULL)
+    # Claim a session lease, cancel exactly it, then run: it terminates as
+    # cancelled and the lease owner releases exactly once (W2-001 B3: run_scan
+    # executes; the party that claimed the lease owns the release).
+    lease = worker.claim_execution()
+    assert lease is not None
+    assert worker.cancel(lease.session_id) is True
+
+    try:
+        worker.run_scan(
+            models, ScanMode.FULL,
+            session_id=lease.session_id, execution=lease,
+        )
+    finally:
+        worker.end_execution(lease)
     assert worker.is_running() is False
+    assert worker.session_controller.active_session is None
+    assert lease.released is True
 
 # Gate F: Provider Circuit Breaker trips on AUTH/BALANCE
 def test_gate_f_circuit_breaker():

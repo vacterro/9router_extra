@@ -43,7 +43,10 @@ def _classify(case):
         ("auth_rejected", AvailabilityState.AUTH_REJECTED),
         ("access_forbidden", AvailabilityState.ACCESS_FORBIDDEN),
         ("waf_blocked", AvailabilityState.WAF_BLOCKED),
-        ("endpoint_or_model_invalid", AvailabilityState.ENDPOINT_OR_MODEL_INVALID),
+        # CORE-003: this fixture carries a semantic 404 (`model_not_found`), so
+        # under the corrected taxonomy it is MODEL_MISSING -- NOT the broad
+        # ENDPOINT_OR_MODEL_INVALID the aliased enum used to collapse onto.
+        ("endpoint_or_model_invalid", AvailabilityState.MODEL_MISSING),
         ("model_gone", AvailabilityState.MODEL_GONE),
         ("router_degraded", AvailabilityState.ROUTER_DEGRADED),
         ("rate_limited", AvailabilityState.RATE_LIMITED),

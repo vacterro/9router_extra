@@ -10,7 +10,6 @@ from ui.watch_view import WatchView
 from ui.combo_editor_view import ComboEditorView, DiffConfirmDialog
 from ui.presets_view import PresetsView
 from ui.inspector_panel import InspectorPanel
-from ui.activity_panel import ActivityPanel
 from ui.main_window import MainWindow
 from core.router_client import RouterClient
 from core.history import HealthCache, ModelHealthRecord
@@ -46,22 +45,11 @@ def test_inspector_panel(qapp):
     assert panel.lbl_canonical_id.text() == "ag/gemini-3.8-flash-high"
     assert "200" in panel.lbl_http.text()
 
-def test_activity_panel(qapp):
-    panel = ActivityPanel()
-    panel.set_scanning(True, 10)
-    assert panel.btn_stop.isEnabled() is True
+def test_activity_panel_removed(qapp):
+    # T-33: the tall ActivityPanel was replaced by the compact scan footer
+    import os
+    assert not os.path.exists(os.path.join(os.path.dirname(__file__), "..", "ui", "activity_panel.py"))
 
-    panel.set_probe_started("ag/gemini-3.8-flash-high")
-    assert "ag/gemini-3.8-flash-high" in panel._in_flight_probes
-
-    panel.set_probe_pending("ag/gemini-3.8-flash-high", 5.2)
-    assert panel._in_flight_probes["ag/gemini-3.8-flash-high"] == 5.2
-
-    panel.set_probe_finished("ag/gemini-3.8-flash-high")
-    assert "ag/gemini-3.8-flash-high" not in panel._in_flight_probes
-
-    panel.set_scanning(False)
-    assert panel.btn_stop.isEnabled() is False
 
 def test_watch_view(qapp, tmp_path):
     cache = HealthCache(cache_file=tmp_path / "cache.json")
@@ -97,11 +85,17 @@ def test_main_window_instantiation(qapp):
     assert window.windowTitle().startswith("9router_WatchEdit")
     assert window.watch_view is not None
     assert window.combo_editor is not None
-    assert window.activity is not None
-    assert window.inspector is not None
-    assert window.vertical_splitter is not None
-    assert window.bottom_tabs is not None
-    assert window.bottom_tabs.count() == 2
+    # T-33: one top-level task workspace, no legacy vertical split surfaces.
+    # FREE-FALLBACK-001 adds exactly one FINAL tab (provider control plane).
+    assert window.main_tabs.count() == 4
+    assert [window.main_tabs.tabText(i) for i in range(4)] == [
+        "Models", "Combo", "OpenCode", "FREE Fallback"
+    ]
+    assert window.main_tabs.currentIndex() == 0
+    assert not hasattr(window, "activity")
+    assert not hasattr(window, "inspector")
+    assert not hasattr(window, "vertical_splitter")
+    assert not hasattr(window, "bottom_tabs")
     window.close()
 
 def test_font_no_antialias(qapp):
@@ -208,7 +202,6 @@ def test_combo_editor_save_apply_and_cancel(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(combo_editor_view.DiffConfirmDialog, "exec", lambda self: QDialog.Rejected)
     view.save_current_combo()
     assert len(client.update_calls) == 1
-    view.change_detection_timer.stop()
     view.close()
     view.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

@@ -1,0 +1,11 @@
+* text=auto
+
+# Evidence and authority bodies are bound by raw digest; a text-normalizing
+# checkout must not rewrite them.
+.saipen/intake/** -text
+.saipen/archive/source/** -text
+.saipen/archive/retired/** -text
+
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

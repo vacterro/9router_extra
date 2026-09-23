@@ -113,9 +113,28 @@ SECURE_DIR = LOCALAPPDATA_DIR / "secure"
 PRIVATE_BACKUP_DIR = LOCALAPPDATA_DIR / "backups" / "private"
 LEGACY_BACKUP_ROOT = LOCALAPPDATA_DIR / "backups"
 DIAGNOSTICS_DIR = LOCALAPPDATA_DIR / "runtime" / "diagnostics"
+# OCF-001: local OpenCode Free bridge private runtime root. The official
+# `opencode` CLI is executed with this directory as its XDG root, so the
+# USER'S global OpenCode config/data is never read for writes and never
+# rewritten. Always outside the repository (private storage root).
+OPENCODE_BRIDGE_DIR = LOCALAPPDATA_DIR / "runtime" / "opencode_bridge"
 if PRIVATE_STORAGE_AVAILABLE:
-    for _d in (BACKUP_DIR, CONFIG_DIR, SECURE_DIR, PRIVATE_BACKUP_DIR, DIAGNOSTICS_DIR):
+    for _d in (BACKUP_DIR, CONFIG_DIR, SECURE_DIR, PRIVATE_BACKUP_DIR, DIAGNOSTICS_DIR,
+               OPENCODE_BRIDGE_DIR):
         _ensure_dir(_d)
+
+# OCF-001 provider lane constants (prefix is the public 9Router model namespace)
+OCF_PROVIDER_PREFIX = "ocf"
+OCF_PROVIDER_NAME = "OpenCode Local Free"
+OCF_UPSTREAM_PREFIX = "opencode"
+# The PUBLIC/catalog OpenCode identity in a live 9Router install: the registry
+# entry declares id "opencode" with alias/uiAlias "oc". Direct `oc/*` free
+# models stay visible for discovery/history but are NOT routable while the
+# upstream rejects arbitrary clients (OCF-001).
+OCF_DIRECT_PREFIX = "oc"
+OCF_DIRECT_PREFIX_ALIASES = ("oc", "opencode")
+OCF_BRIDGE_HOST = "127.0.0.1"
+OCF_BRIDGE_DEFAULT_PORT = 20130
 
 # Local (machine-private) settings file for the security layer
 LOCAL_SETTINGS_FILE = CONFIG_DIR / "settings.json"
@@ -137,6 +156,7 @@ DEFAULT_GLOBAL_CONCURRENCY = 3
 DEFAULT_PER_PROVIDER_CONCURRENCY = 1
 DEFAULT_FAST_TIMEOUT_SEC = 4.0
 DEFAULT_SLOW_TIMEOUT_SEC = 15.0
+REASONING_MODEL_TIMEOUT_SEC = 30.0  # Extended timeout for reasoning models like SWE-1.6 Slow
 PENDING_THRESHOLD_SEC = 3.0
 FAILURE_STREAK_FOR_DEAD = 3
 
@@ -150,6 +170,13 @@ REDACT_PATTERNS = [
     re.compile(r'sk-[a-zA-Z0-9_\-\.]{12,}'),
     re.compile(r'9r-[a-zA-Z0-9_\-\.]{8,}'),
     re.compile(r'(?i)kira_[a-zA-Z0-9_\-\.]{8,}'),
+]
+
+# Reasoning Model Patterns - models that need extended timeout
+REASONING_MODEL_PATTERNS = [
+    re.compile(r'swe-1\.6-slow', re.IGNORECASE),
+    re.compile(r'reasoning', re.IGNORECASE),
+    re.compile(r'thinking', re.IGNORECASE),
 ]
 
 def redact_secrets(text: str) -> str:

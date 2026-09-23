@@ -208,7 +208,8 @@ def test_cli_custom_local_ports(url, monkeypatch):
     import run
 
     monkeypatch.setattr(run.sys, "argv", ["watchedit", "--cli", "--router-url", url])
-    startup = Mock()
+    startup = Mock(return_value=0)
     monkeypatch.setattr(run, "run_cli_mode", startup)
-    run.main()
+    with pytest.raises(SystemExit):
+        run.main()
     assert startup.call_args.args[0].router_url == url

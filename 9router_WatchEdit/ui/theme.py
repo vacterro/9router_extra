@@ -35,18 +35,39 @@ COLOR_COMPARE_BACK = "#14120C"
 COLOR_LINK = "#F0D060"
 
 # Badges Background & Text Mapping
+# CORE-003: keys are the CANONICAL persisted state values produced by
+# get_ui_badge / ModelHealthRecord.state. Legacy display labels are kept as
+# fallback keys so any older string still renders.
 STATE_COLORS = {
     "FREE/USE": {"bg": COLOR_SUCCESS, "fg": "#FFFFFF"},
     "PAID": {"bg": COLOR_SURFACE_RAISED, "fg": COLOR_BORDER_HIGHLIGHT, "border": COLOR_BEVEL_LIGHT},
+    "BALANCE_REQUIRED": {"bg": COLOR_WARNING, "fg": "#FFFFFF"},
+    "AUTH_REJECTED": {"bg": COLOR_DANGER, "fg": "#FFFFFF"},
+    "ACCESS_FORBIDDEN": {"bg": COLOR_DANGER, "fg": "#FFFFFF"},
+    "RATE_LIMITED": {"bg": "#8A6D1C", "fg": "#FFFFFF"},
+    "PENDING": {"bg": COLOR_ACCENT_TEAL, "fg": "#FFFFFF"},
+    "CONNECT_TIMEOUT": {"bg": "#6B4226", "fg": "#FFFFFF"},
+    "PROVIDER_ERROR": {"bg": "#5A3434", "fg": "#E0A0A0"},
+    "ENDPOINT_OR_MODEL_INVALID": {"bg": "#4A324A", "fg": "#DDA0DD"},
+    "MODEL_INVALID": {"bg": "#4A324A", "fg": "#DDA0DD"},
+    "MODEL_MISSING": {"bg": "#4A324A", "fg": "#DDA0DD"},
+    "ROUTE_ERROR": {"bg": "#4A324A", "fg": "#DDA0DD"},
+    "MODEL_GONE": {"bg": "#4A324A", "fg": "#DDA0DD"},
+    "ROUTER_DEGRADED": {"bg": "#5A3434", "fg": "#E0A0A0"},
+    "DNS_FAILURE": {"bg": "#5A3434", "fg": "#E0A0A0"},
+    "NON_API_HTML_RESPONSE": {"bg": "#4A4A2A", "fg": "#D8D890"},
+    "WAF_BLOCKED": {"bg": "#4A4A2A", "fg": "#D8D890"},
+    "BROWSER_CHALLENGE": {"bg": "#4A4A2A", "fg": "#D8D890"},
+    "MODEL_DISCOVERY_UNAVAILABLE": {"bg": COLOR_SURFACE_ALT, "fg": COLOR_TEXT_SECONDARY},
+    "DEAD": {"bg": COLOR_DANGER, "fg": "#FFFFFF"},
+    "UNKNOWN": {"bg": COLOR_SURFACE_ALT, "fg": COLOR_TEXT_SECONDARY},
+    # Legacy display-label fallbacks.
     "BALANCE": {"bg": COLOR_WARNING, "fg": "#FFFFFF"},
     "AUTH": {"bg": COLOR_DANGER, "fg": "#FFFFFF"},
     "RATE LIMIT": {"bg": "#8A6D1C", "fg": "#FFFFFF"},
-    "PENDING": {"bg": COLOR_ACCENT_TEAL, "fg": "#FFFFFF"},
     "TIMEOUT": {"bg": "#6B4226", "fg": "#FFFFFF"},
     "TEMP ERROR": {"bg": "#5A3434", "fg": "#E0A0A0"},
     "MODEL MISSING": {"bg": "#4A324A", "fg": "#DDA0DD"},
-    "DEAD": {"bg": COLOR_DANGER, "fg": "#FFFFFF"},
-    "UNKNOWN": {"bg": COLOR_SURFACE_ALT, "fg": COLOR_TEXT_SECONDARY},
 }
 
 GOLDEN_DEFAULT_QSS = f"""

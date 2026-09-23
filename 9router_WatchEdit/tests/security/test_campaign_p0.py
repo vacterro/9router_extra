@@ -671,8 +671,10 @@ class TestDeploy:
         monkeypatch.setenv("WATCHEDIT_DATA_DIR", str(priv))
         monkeypatch.setattr(dl, "PRIVATE_RUNTIME_ROOT", priv)
         real_git = dl._git
+        target_sha = real_git(["rev-parse", "feature^{commit}"], repo).stdout.strip()
         def flaky_checkout(args, repo_root=None):
-            if args and args[0] == "checkout" and len(args) > 1 and args[1] == "feature":
+            # W2-002: activation now checks out the resolved SHA (detached).
+            if args and args[0] == "checkout" and target_sha and target_sha in args:
                 class R:
                     returncode = 1
                     stderr = "error: unable to unlink 'app.py': file locked by running process"

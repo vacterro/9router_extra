@@ -17,8 +17,43 @@ from core.history import HealthCache
 from core.discovery import ModelDiscovery
 from core.probe import ScannerWorker, ScanMode
 from core.combo_manager import PresetManager
+from core.security import LiveAccessLockedError
 
-def run_cli_mode(args):
+# W2-005: authoritative CLI exit codes derived from ScannerWorker's terminal
+# status. Only COMPLETED is success; every other terminal state is non-zero and
+# distinctly identifiable so a scripted caller cannot read false green.
+CLI_EXIT_OK = 0
+CLI_EXIT_FAILED = 1
+CLI_EXIT_LOCKED = 2
+CLI_EXIT_CANCELLED = 3
+CLI_EXIT_PERSISTENCE_FAILED = 4
+CLI_EXIT_NOT_FOUND = 5
+CLI_EXIT_BUSY = 6
+
+_TERMINAL_EXITS = {
+    "COMPLETED": CLI_EXIT_OK,
+    "FAILED": CLI_EXIT_FAILED,
+    "COMPLETED_PERSISTENCE_FAILED": CLI_EXIT_PERSISTENCE_FAILED,
+    "CANCELLED": CLI_EXIT_CANCELLED,
+    "LOCKED": CLI_EXIT_LOCKED,
+}
+
+_TERMINAL_MESSAGES = {
+    "COMPLETED": "Scan completed successfully.",
+    "FAILED": "Scan FAILED.",
+    "COMPLETED_PERSISTENCE_FAILED": "Scan completed but results were NOT persisted.",
+    "CANCELLED": "Scan CANCELLED.",
+    "LOCKED": "Scan refused: secrets are LOCKED.",
+}
+
+
+def run_cli_mode(args) -> int:
+    """Headless scan; returns the process exit code (W2-005).
+
+    Only the COMPLETED terminal status prints success and exits 0. A requested
+    combo that is not found, a busy scanner (run_scan returned None), and the
+    LOCKED security boundary are all non-zero and clearly labelled.
+    """
     print("=" * 60)
     print("9router_WatchEdit - Headless Scanner")
     print("=" * 60)
@@ -27,11 +62,20 @@ def run_cli_mode(args):
     cache = HealthCache()
     discovery = ModelDiscovery(client)
 
-    if not client.is_server_reachable():
+    try:
+        reachable = client.is_server_reachable()
+    except LiveAccessLockedError:
+        print("Scan refused: secrets are LOCKED. Unlock live access first.")
+        return CLI_EXIT_LOCKED
+    if not reachable:
         print(f"[!] Warning: 9Router not reachable at {client.base_url}. Using SQLite fallback.")
 
     if args.list_combos:
-        combos = client.get_combos()
+        try:
+            combos = client.get_combos()
+        except LiveAccessLockedError:
+            print("List combos refused: secrets are LOCKED. Unlock live access first.")
+            return CLI_EXIT_LOCKED
         print(f"Found {len(combos)} combos in 9Router:")
         for c in combos:
             models = c.get("models", [])
@@ -42,9 +86,13 @@ def run_cli_mode(args):
                 print(f"      #{idx+1:02d} {m} {st}")
             if len(models) > 5:
                 print(f"      ... +{len(models)-5} more")
-        return
+        return CLI_EXIT_OK
 
-    models = discovery.discover_all()
+    try:
+        models = discovery.discover_all()
+    except LiveAccessLockedError:
+        print("Scan refused: secrets are LOCKED. Unlock live access first.")
+        return CLI_EXIT_LOCKED
     print(f"Discovered {len(models)} models across connected providers.\n")
 
     mode = ScanMode.QUICK
@@ -80,11 +128,17 @@ def run_cli_mode(args):
             print(f"Scanning combo '{args.combo}' ({len(target_combo_models)} models):")
         else:
             print(f"Combo '{args.combo}' not found.")
-            return
+            return CLI_EXIT_NOT_FOUND
 
     print(f"Starting {mode.value} scan...")
-    worker.run_scan(models, mode=mode, target_combo_models=target_combo_models)
-    print("\nScan completed successfully.")
+    status = worker.run_scan(models, mode=mode, target_combo_models=target_combo_models)
+    if status is None:
+        # No lease: a session is already active or the scanner is closing.
+        print("\nScan not started: another scan is already active.")
+        return CLI_EXIT_BUSY
+
+    print(f"\n{_TERMINAL_MESSAGES.get(status, f'Scan ended: {status}')}")
+    return _TERMINAL_EXITS.get(status, CLI_EXIT_FAILED)
 
 def run_gui_mode():
     from PySide6.QtCore import Qt
@@ -127,7 +181,7 @@ def main():
         parser.error(f"--router-url: {ex}")
 
     if args.cli or args.list_combos or args.combo:
-        run_cli_mode(args)
+        sys.exit(run_cli_mode(args))
     else:
         run_gui_mode()
 

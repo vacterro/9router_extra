@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
-from core.combo_manager import PresetManager, Preset
+from core.combo_manager import PresetManager, Preset, PresetPersistenceError
 from core.history import HealthCache
 from ui.theme import (
     COLOR_BORDER_HIGHLIGHT,
@@ -215,7 +215,14 @@ class PresetsView(QWidget):
         name, ok = QInputDialog.getText(self, "Save Preset", "Enter name for new preset:")
         if ok and name.strip():
             pname = name.strip()
-            self.preset_manager.save_preset(pname, self.current_live_models, "User saved preset")
+            try:
+                self.preset_manager.save_preset(pname, self.current_live_models, "User saved preset")
+            except PresetPersistenceError as ex:
+                QMessageBox.critical(
+                    self, "Save Preset Failed",
+                    f"Preset '{pname}' could not be saved and was not stored.\n\n{ex}",
+                )
+                return
             self.refresh_presets_list()
 
     def _delete_preset(self):
@@ -227,5 +234,12 @@ class PresetsView(QWidget):
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            self.preset_manager.delete_preset(self._selected_preset_name)
+            try:
+                self.preset_manager.delete_preset(self._selected_preset_name)
+            except PresetPersistenceError as ex:
+                QMessageBox.critical(
+                    self, "Delete Preset Failed",
+                    f"Preset '{self._selected_preset_name}' could not be deleted; it is unchanged.\n\n{ex}",
+                )
+                return
             self.refresh_presets_list()

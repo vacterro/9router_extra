@@ -118,7 +118,113 @@ Transients (`RATE_LIMIT -> TEMP_ERROR -> 404`) never accumulate toward `DEAD`.
 
 ---
 
-## 5. Launch & Verification
+## 5. FREE Fallback Control Plane (provider-first)
+
+The final main tab (`FREE Fallback`) controls which providers are allowed to
+grow the "better than zero" fallback pool. **Providers** are the primary
+surface; models are a drilldown. The tab itself performs no I/O: opening,
+sorting, filtering and selecting only rearrange local state, and a scan runs
+only from an explicit action.
+
+### Scan policy vs. scan mode
+
+They answer different questions and are stored separately:
+
+- **Scan policy** — *when* a provider may be scanned: `ALWAYS`, `STALE_ONLY`
+  (refresh only when the metadata is older than the staleness window),
+  `MANUAL` (explicit actions only) or `NEVER`.
+- **Scan mode** — *what* a scan is allowed to do: `METADATA_ONLY`,
+  `METADATA_AND_LIVE_PROBE` or `DISABLED`.
+
+A provider can therefore be "enabled but metadata-only", which is the default
+for every provider with a real catalog adapter: discovery is free, inference is
+not.
+
+### Metadata discovery vs. live validation
+
+- **Metadata Scan Selected** reads only the adapter's documented catalog or
+  local metadata source and executes **zero inference calls**. Proven by
+  counter in the tests and enforced in the controller: a metadata result that
+  reports an inference call is rejected, not believed.
+- **Validate Selected** may execute one bounded official canary, and only when
+  the adapter declares a canary path, the provider is selected and enabled,
+  trusted-alive is not suppressing it, the policy permits it, and the monetary
+  cost class is proven safe or the operator granted the per-provider billing
+  consent. `POSSIBLE_BILLING`, `ACCOUNT_CONDITIONAL` and `UNKNOWN` live probes
+  are refused by default.
+- **Scan Selected** follows each provider's configured policy/mode. If the mode
+  requests a live probe that the cost guard refuses, the provider is downgraded
+  to a metadata refresh and the refusal is shown — never silently probed.
+
+### Trusted-alive (operator override)
+
+A provider can be marked trusted-alive for 1h / 1d / 7d / 30d or until manually
+cleared. Trust suppresses needless live probing while it is valid. It never
+fabricates FREE evidence, never overrides a PAID/POSSIBLE_BILLING
+classification, never makes an unsupported route routable, and when it expires
+the provider simply becomes eligible for live validation again. A positive
+authoritative failure (auth revoked, runtime gone) still supersedes it.
+
+### Cost-risk vocabulary
+
+Monetary risk and quota consumption are separate classes on purpose:
+`ZERO_MONETARY_METADATA`, `FREE_QUOTA_PROBE`, `ACCOUNT_CONDITIONAL`,
+`POSSIBLE_BILLING`, `UNKNOWN`. Metadata cost risk and live-probe cost risk are
+stored separately.
+
+Badges are explanatory only ($0 METADATA, FREE QUOTA, ACCOUNT CONDITIONAL,
+CLIENT BOUND, POSSIBLE COST, RATE LIMITED, NO FREE ADAPTER); the underlying
+policy and evidence fields stay authoritative.
+
+### Strict FREE evidence
+
+Eligibility is classified, never inferred:
+
+- `STRICT_FREE` requires machine-verifiable zero-cost evidence from an
+  authoritative source: explicit zero pricing, an official free route
+  (`:free`), or an explicit catalogue `is_free` flag.
+- `CONDITIONAL_FREE` covers trial, signup/promo credit, coupons and ambiguous
+  marketing text. These providers stay **visible** in the table but are never
+  auto-synced into the strict FREE tail: credit is not permanent zero cost and
+  a coupon can turn into an invoice.
+- `UNKNOWN_COST`, `PAID`, `WITHDRAWN` are never auto-added.
+- `CLIENT_BOUND_FREE` (for example the OpenCode free tier) reaches SAIFREN only
+  through the existing `ocf/*` local-bridge contract, never as a generic
+  routable FREE route.
+
+The four dimensions — free evidence, provider health, routing capability and
+cost risk — are kept independent. A provider being alive proves no model is
+free; a model being free proves nothing about routability; a successful
+metadata read proves nothing about inference health; and a failed live probe
+never erases authoritative FREE evidence.
+
+### Better-than-zero tail policy
+
+`Sync strict FREE to SAIFREN bottom` appends eligible routes at the very bottom
+of SAIFREN and is idempotent:
+
+- existing reliable routes keep their relative order and are never reordered;
+- manual entries are preserved verbatim;
+- a `STRICT_FREE` route whose health is still `UNKNOWN` stays eligible at the
+  absolute tail as long as monetary cost is strictly zero, the routing
+  mechanism is supported, it is not positively DEAD/AUTH_FAILED, and its
+  timeout/backoff behaviour is bounded;
+- `PAID`, `POSSIBLE_BILLING`, `UNKNOWN_COST`, conditional, auth-failed,
+  withdrawn and DEAD routes are never auto-added;
+- removal happens **only** for scanner-owned entries after a *successful
+  authoritative* refresh positively drops their FREE evidence. A provider or
+  source outage prunes nothing and last-known-good inventory survives;
+- the diff is shown for confirmation before any mutation.
+
+### No implicit mutation
+
+A catalog refresh never rewrites the live combo. Adding or removing SAIFREN
+entries is always an explicit operator action, applied through the existing
+verified combo-apply path (official API plus read-back verification).
+
+---
+
+## 6. Launch & Verification
 
 ### Launch
 Run `START_WATCHEDIT.bat` from project root or execute:

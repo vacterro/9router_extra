@@ -114,15 +114,20 @@ def test_ui_terminal_status_messages(qapp, tmp_path):
 
     window = MainWindow()
 
-    window._on_scan_completed("COMPLETED")
+    # W2-001: scan callbacks carry the owning session id; session 0 is
+    # never an active session, so a direct-slot legacy call would be
+    # rejected. The tests below claim a real session and target it.
+    session_id = window.worker.try_start_session()
+    assert session_id is not None
+    window._on_scan_completed(session_id, "COMPLETED")
     assert window.status_bar.currentMessage().startswith("Scan completed")
 
-    window._on_scan_completed("CANCELLED")
+    window._on_scan_completed(session_id, "CANCELLED")
     assert window.status_bar.currentMessage().startswith("Scan cancelled")
 
     # Real run_scan order: on_scan_failed(reason) fires BEFORE on_scan_completed("FAILED")
-    window._on_scan_failed("redacted diagnostic reason")
-    window._on_scan_completed("FAILED")
+    window._on_scan_failed(session_id, "redacted diagnostic reason")
+    window._on_scan_completed(session_id, "FAILED")
     final_msg = window.status_bar.currentMessage()
     assert final_msg.startswith("Scan failed")
     assert "redacted diagnostic reason" in final_msg
@@ -143,28 +148,32 @@ def test_cost_override_ui_receives_record_never_bool(qapp, monkeypatch, tmp_path
         availability="LIVE", cost="PAID",
     )
     window.cache = tmp_cache
-    window.inspector._current_canonical_id = cid
+
+    # T-33: cost override lives in the explicit Model Details dialog
+    window._open_model_details(cid)
+    inspector = window._details_dialog.inspector
+    assert inspector._current_canonical_id == cid
 
     captured = []
     monkeypatch.setattr(window.watch_view, "update_probe_result", lambda c, rec: captured.append(rec))
-    monkeypatch.setattr(window.inspector, "set_model", lambda c, rec: captured.append(rec))
 
     # FREE
-    window._on_cost_override_changed(cid, "FREE")
-    assert len(captured) == 2
-    assert all(isinstance(rec, ModelHealthRecord) for rec in captured)
+    inspector.btn_override_free.click()
+    assert len(captured) == 1
+    assert isinstance(captured[0], ModelHealthRecord)
     assert captured[0].cost_override == "FREE"
     assert captured[0].is_free() is True
+    assert inspector._current_canonical_id == cid
 
     # PAID
     captured.clear()
-    window._on_cost_override_changed(cid, "PAID")
+    inspector.btn_override_paid.click()
     assert all(isinstance(rec, ModelHealthRecord) for rec in captured)
     assert captured[0].cost_override == "PAID"
 
     # Clear override
     captured.clear()
-    window._on_cost_override_changed(cid, None)
+    inspector.btn_override_auto.click()
     assert all(isinstance(rec, ModelHealthRecord) for rec in captured)
     assert captured[0].cost_override is None
     window.close()

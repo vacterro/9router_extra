@@ -9,6 +9,7 @@ from core.classification import (
     classify_probe_result,
     is_provider_or_model_known_free,
 )
+from core.probe import is_reasoning_model
 
 def test_classify_success_free_provider():
     res = classify_probe_result(
@@ -153,3 +154,19 @@ def test_classify_cost_override():
     )
     assert res.state == HealthState.FREE_USE
     assert res.cost_status == CostStatus.FREE
+
+def test_reasoning_model_detection():
+    """Test reasoning model pattern matching for extended timeout support."""
+    # SWE-1.6 Slow should be detected as reasoning model
+    assert is_reasoning_model("cog/swe-1.6-slow")
+    assert is_reasoning_model("cog/SWE-1.6-SLOW")
+    
+    # Generic reasoning patterns
+    assert is_reasoning_model("claude-opus-5-thinking")
+    assert is_reasoning_model("gpt-4o-reasoning")
+    assert is_reasoning_model("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+    
+    # Non-reasoning models should not match
+    assert not is_reasoning_model("ag/gemini-3.8-flash-high")
+    assert not is_reasoning_model("wb/hy3")
+    assert not is_reasoning_model("deepseek-v4-flash")

@@ -6,11 +6,12 @@ exact latency, failure/success streaks, classification rationale, and raw error 
 from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QDialog,
     QHBoxLayout,
-    QLabel,
     QPushButton,
+    QVBoxLayout,
+    QWidget,
+    QLabel,
     QTextEdit,
     QGroupBox,
     QFrame,
@@ -215,3 +216,31 @@ class InspectorPanel(QWidget):
     def _on_add_to_combo_clicked(self):
         if self._current_canonical_id:
             self.add_to_combo_requested.emit(self._current_canonical_id)
+
+
+class ModelDetailsDialog(QDialog):
+    """Explicit Model Details surface (T-33).
+
+    Reuses InspectorPanel logic; opened only by an explicit user action
+    (double-click, Enter, Retest flow), never by selection change."""
+
+    def __init__(self, canonical_id: str, record: Optional[ModelHealthRecord], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.inspector = InspectorPanel()
+        self.inspector.group.setTitle("Model Details")
+        self.inspector.set_model(canonical_id, record)
+        self.setWindowTitle(f"Model Details: {canonical_id}")
+        self.setMinimumSize(420, 380)
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.addWidget(self.inspector)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.close)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)

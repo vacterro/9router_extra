@@ -85,6 +85,107 @@ class DeployRecoveryRequired(RuntimeError):
     pass
 
 
+def _resolve_target_sha(source: Optional[str], repo_root: Path) -> Optional[str]:
+    """W2-002: resolve a requested ref to ONE immutable commit SHA.
+
+    Returns the SHA, or None when the ref cannot be resolved. Deployment must
+    validate and activate exactly this SHA, never a moving branch name, so the
+    validated identity and the activated identity are the same object.
+    """
+    ref = source or "HEAD"
+    res = _git(["rev-parse", f"{ref}^{{commit}}"], repo_root)
+    sha = res.stdout.strip()
+    return sha or None
+
+
+def _activate_sha(sha: str, repo_root: Path) -> bool:
+    """W2-002: activate exactly the resolved SHA (detached), never a branch."""
+    res = _git(["checkout", "--detach", sha], repo_root)
+    if res.returncode != 0:
+        _git(["checkout", "-f", sha], repo_root)
+    current = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
+    return current == sha
+
+
+def _validate_target_revision(repo_root: Path, target_sha: str, skip_tests: bool):
+    """W2-002: validate the exact target revision in an isolated worktree.
+
+    Runs agent-safety verification (and the test gate unless skipped) against a
+    temporary worktree checked out at ``target_sha`` so the active checkout is
+    never mutated before the gate passes. Returns (ok, detail, steps)."""
+    steps = []
+    worktree = repo_root / ".git" / "predeploy_verify_wt"
+    if worktree.exists():
+        _git(["worktree", "remove", "--force", str(worktree)], repo_root)
+    add = _git(["worktree", "add", "--detach", "--force", str(worktree), target_sha], repo_root)
+    try:
+        if add.returncode != 0:
+            return False, f"could not create validation worktree: {add.stderr.strip()}", steps
+        try:
+            findings = vas.verify_agent_safe(worktree)
+        except Exception as ex:
+            return False, f"target validation raised {type(ex).__name__} (fail closed)", steps
+        if findings:
+            return False, vas.format_result(findings), steps
+        if not skip_tests:
+            tr = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--no-header"],
+                cwd=str(worktree), capture_output=True, text=True, timeout=900,
+            )
+            if tr.returncode != 0:
+                tail = (tr.stdout or tr.stderr).strip().splitlines()[-1] if tr.stdout else "tests failed"
+                return False, f"target revision tests failed: {tail}", steps
+        steps.append(f"validated target revision {target_sha[:10]} in isolated worktree")
+        return True, "", steps
+    finally:
+        _git(["worktree", "remove", "--force", str(worktree)], repo_root)
+
+
+def _rollback_runtime_and_source(
+    repo_root: Path,
+    original_ref: str,
+    original_sha: str,
+    original_was_running: bool,
+    target_launched: bool,
+) -> tuple:
+    """W2-003: restore BOTH source and required runtime state.
+
+    Source rollback alone is not rollback when the failed target process is
+    still alive and the original runtime is still stopped. Returns (ok, steps);
+    ok is True only when source is back at ``original_sha`` AND the runtime
+    state matches the pre-deploy state (target stopped; original restarted iff
+    it was running). Any incomplete restoration -> RECOVERY_REQUIRED."""
+    steps = []
+    ok = True
+
+    if target_launched:
+        stopped = _stop_running_instance(repo_root)
+        steps.append(f"12a. rollback runtime: failed target instance "
+                     f"{'stopped' if stopped else 'stop unconfirmed'}")
+        ok = ok and stopped
+
+    back1 = _git(["checkout", "-f", original_ref], repo_root)
+    head = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
+    if back1.returncode != 0 or head != original_sha:
+        # Fall back to the immutable SHA if the branch ref is gone.
+        back1 = _git(["checkout", "-f", original_sha], repo_root)
+        head = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
+    if back1.returncode != 0 or head != original_sha:
+        steps.append("12b. rollback source: FAILED")
+        return False, steps
+    steps.append(f"12b. rollback source: restored {original_ref} @ {original_sha[:10]}")
+
+    if original_was_running:
+        relaunched = _start_instance(repo_root)
+        steps.append(f"12c. rollback runtime: original instance "
+                     f"{'restarted' if relaunched else 'restart FAILED'}")
+        ok = ok and relaunched
+    else:
+        steps.append("12c. rollback runtime: no original instance to restart")
+
+    return ok, steps
+
+
 def last_status() -> str:
     """Terminal state of the most recent deploy (GATE 6/27 vocabulary)."""
     return _last_status
@@ -184,6 +285,16 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
     original_sha = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
     steps.append(f"2. revision: {original_ref} @ {original_sha[:10]} (clean)")
 
+    # W2-002: resolve the requested source to ONE immutable target SHA before
+    # any validation, so the validated identity and the activated identity are
+    # the same object (never a moving branch name).
+    target_sha = _resolve_target_sha(source, repo_root)
+    if target_sha is None:
+        return finish(STATUS_FAILED_NO_MUTATION, False,
+                      [f"DEPLOY ABORTED: cannot resolve source {source!r} to a commit SHA."])
+    if source:
+        steps.append(f"2b. target revision resolved: {source} -> {target_sha[:10]}")
+
     # 3. Unit tests
     if not skip_tests:
         tr = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header"],
@@ -201,22 +312,39 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
     steps.append("4. build: not required (pure Python source deployment)")
 
     # 5. Rollback point + transactional marker (GATE 7)
+    # W2-002: the target must have passed agent-safety verification as the SAME
+    # revision that will be activated. When it differs from the current HEAD,
+    # validate the target in an ISOLATED temporary worktree so the active
+    # checkout is not mutated before the gate passes.
+    if target_sha != original_sha:
+        ok, detail, td_steps = _validate_target_revision(repo_root, target_sha, skip_tests)
+        steps.extend(td_steps)
+        if not ok:
+            return finish(STATUS_FAILED_NO_MUTATION, False,
+                          [f"DEPLOY ABORTED: target revision {target_sha[:10]} failed validation.", detail])
+
     tag = f"predeploy/{time.strftime('%Y%m%d_%H%M%S')}"
     _git(["tag", "-f", tag, original_sha], repo_root)
     marker = _marker_path(repo_root)
     marker.write_text(json.dumps({
         "state": "VALIDATED", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "original_ref": original_ref, "original_sha": original_sha, "tag": tag,
+        "original_ref": original_ref, "original_sha": original_sha,
+        "target_sha": target_sha, "tag": tag,
     }), encoding="utf-8")
     steps.append(f"5. rollback point: git tag {tag} + transactional marker")
 
     deployed = False
+    # W2-003: explicit runtime transition state for rollback correctness.
+    original_was_running = False
+    target_launched = False
+    verification_started = False
     try:
         # RACE-001: re-verify immediately before mutation — an earlier PASS
         # must never permanently authorize a since-changed tree.
         marker.write_text(json.dumps({
             "state": "APPLYING", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "original_ref": original_ref, "original_sha": original_sha, "tag": tag,
+            "original_ref": original_ref, "original_sha": original_sha,
+            "target_sha": target_sha, "tag": tag,
         }), encoding="utf-8")
         try:
             findings2 = vas.verify_agent_safe(repo_root)
@@ -230,19 +358,16 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         # 6. Stop running instance only when required
         if restart:
             stopped = _stop_running_instance(repo_root)
+            original_was_running = stopped
             steps.append(f"6. running instance: {'stopped' if stopped else 'none found'}")
         else:
             steps.append("6. running instance: left as-is (no --restart)")
 
-        # 7. Deploy CODE only
-        if source:
-            res = _git(["checkout", source], repo_root)
-            if res.returncode != 0:
-                log(f"DEPLOY FAILED at checkout of {source}: {res.stderr.strip()}")
-                raise RuntimeError("checkout failed")
-            steps.append(f"7. code deployed: checked out {source}")
-        else:
-            steps.append(f"7. code deployed: {original_ref} @ {original_sha[:10]} (already active)")
+        # 7. Activate CODE only — exactly the resolved immutable SHA (W2-002)
+        if not _activate_sha(target_sha, repo_root):
+            log(f"DEPLOY FAILED at activation of {target_sha[:10]}")
+            raise RuntimeError("activation failed")
+        steps.append(f"7. code deployed: activated {target_sha[:10]}")
 
         # 8. Private runtime state preserved (never written by deploy)
         steps.append(f"8. private runtime preserved: {PRIVATE_RUNTIME_ROOT} (untouched)")
@@ -250,6 +375,7 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         # 9. Restart / reload
         if restart:
             launched = _start_instance(repo_root)
+            target_launched = launched
             steps.append(f"9. app restart: {'launched' if launched else 'launch FAILED'}")
             if not launched:
                 raise RuntimeError("restart failed")
@@ -259,8 +385,10 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         # 10. Local smoke test
         marker.write_text(json.dumps({
             "state": "VERIFYING", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "original_ref": original_ref, "original_sha": original_sha, "tag": tag,
+            "original_ref": original_ref, "original_sha": original_sha,
+            "target_sha": target_sha, "tag": tag,
         }), encoding="utf-8")
+        verification_started = True
         ok, detail = _smoke_test(repo_root)
         steps.append(f"10. smoke test: {'OK' if ok else detail}")
         if not ok:
@@ -269,24 +397,34 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
         deployed = True
         marker.write_text(json.dumps({
             "state": "COMPLETED", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "original_ref": original_ref, "original_sha": original_sha, "tag": tag,
+            "original_ref": original_ref, "original_sha": original_sha,
+            "target_sha": target_sha, "tag": tag,
         }), encoding="utf-8")
     except RuntimeError as ex:
-        # 12. Rollback code; private state remains untouched (GATE 20:
-        # SOURCE ROLLBACK only — never a private-data restore)
-        back1 = _git(["checkout", "-f", original_ref], repo_root)
-        back2 = _git(["checkout", original_ref], repo_root)
-        if back1.returncode == 0 or back2.returncode == 0:
+        # 12. W2-003: restore BOTH source and required runtime state. Source
+        # rollback alone is not rollback when the failed target process is still
+        # alive and the original runtime is still stopped.
+        restored, rb_steps = _rollback_runtime_and_source(
+            repo_root, original_ref, original_sha,
+            original_was_running, target_launched,
+        )
+        steps.extend(rb_steps)
+        if restored:
             marker.write_text(json.dumps({
                 "state": "ROLLED_BACK", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "original_ref": original_ref, "original_sha": original_sha, "tag": tag,
+                "original_ref": original_ref, "original_sha": original_sha,
+                "target_sha": target_sha, "tag": tag,
             }), encoding="utf-8")
-            log(f"ROLLBACK CODE -> {original_ref} @ {original_sha[:10]} ({ex})")
+            log(f"ROLLBACK -> {original_ref} @ {original_sha[:10]} ({ex})")
             log("Private runtime state was not touched.")
             deployed = False
         else:
-            # GATE 6/D10: rollback itself failed — never claim the system is restored
-            log(f"ROLLBACK FAILED after deploy failure ({ex}).")
+            marker.write_text(json.dumps({
+                "state": "RECOVERY_REQUIRED", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "original_ref": original_ref, "original_sha": original_sha,
+                "target_sha": target_sha, "tag": tag,
+            }), encoding="utf-8")
+            log(f"ROLLBACK INCOMPLETE after deploy failure ({ex}).")
             log("RECOVERY_REQUIRED: manual intervention needed; original revision "
                 f"{original_ref} @ {original_sha[:10]} (tag {tag}).")
             deployed = False

@@ -412,10 +412,11 @@ class TestGate6CrashMatrix:
         priv = self._priv(tmp_path)
         monkeypatch.setenv("WATCHEDIT_DATA_DIR", str(priv))
         monkeypatch.setattr(dl, "PRIVATE_RUNTIME_ROOT", priv)
-        # D5: checkout of the source ref fails mid-deploy
+        # D5: activation checkout fails mid-deploy (W2-002: detached SHA).
         real_git = dl._git
+        target_sha = real_git(["rev-parse", "feat4^{commit}"], repo).stdout.strip()
         def flaky(args, repo_root=None):
-            if args and args[0] == "checkout" and "feat4" in args:
+            if args and args[0] == "checkout" and target_sha and target_sha in args:
                 class R:
                     returncode, stderr = 1, "locked"
                 return R()
@@ -448,6 +449,7 @@ class TestGate6CrashMatrix:
         assert self._deploy(dl, repo, source="feat6", restart=True) is False
         assert dl.last_status() == "FAILED_ROLLED_BACK"
         monkeypatch.setattr(dl, "_start_instance", lambda *a, **k: True)
+        monkeypatch.setattr(dl, "_stop_running_instance", lambda *a, **k: True)
         monkeypatch.setattr(dl, "_smoke_test", lambda *a, **k: (False, "health check failed"))
         assert self._deploy(dl, repo, source="feat6", restart=True) is False
         assert dl.last_status() == "FAILED_ROLLED_BACK"

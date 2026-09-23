@@ -43,7 +43,7 @@ sys.path.insert(0, str(REPO_ROOT / "9router_WatchEdit"))
 from core.secret_scanner import scan_file  # noqa: E402
 
 # Derived code caches: regenerated from scanned source.
-SKIP_DIR_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+SKIP_DIR_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".saipen"}
 # .git internals pruned (history is audited separately by check_git_history.py);
 # the plain-text .git/config remains scannable.
 GIT_PRUNE_DIRS = {"objects", "pack", "hooks", "info", "refs", "logs", "lfs", "filter-repo", "worktrees"}
