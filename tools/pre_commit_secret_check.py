@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -36,13 +37,31 @@ def main() -> int:
         return 0  # not a git repo / no index: nothing to gate
 
     findings = []
-    for rel in staged.stdout.splitlines():
-        rel = rel.strip()
-        if not rel:
-            continue
-        p = REPO_ROOT / rel
-        if p.is_file():
-            findings.extend(scan_file(p, REPO_ROOT))
+    with tempfile.TemporaryDirectory(prefix="precommit-secret-") as temp_dir:
+        scan_root = Path(temp_dir)
+        for rel in staged.stdout.splitlines():
+            rel = rel.strip()
+            if not rel:
+                continue
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                print(f"COMMIT BLOCKED: unsafe staged path {rel}", file=sys.stderr)
+                return 1
+            blob = subprocess.run(
+                ["git", "show", f":{rel}"],
+                capture_output=True, cwd=str(REPO_ROOT),
+            )
+            if blob.returncode != 0:
+                print(f"COMMIT BLOCKED: cannot read staged blob {rel}", file=sys.stderr)
+                return 1
+            staged_path = scan_root / rel_path
+            try:
+                staged_path.parent.mkdir(parents=True, exist_ok=True)
+                staged_path.write_bytes(blob.stdout)
+            except OSError as ex:
+                print(f"COMMIT BLOCKED: cannot stage-scan {rel}: {type(ex).__name__}", file=sys.stderr)
+                return 1
+            findings.extend(scan_file(staged_path, scan_root))
 
     if findings:
         print(format_report(findings))

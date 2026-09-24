@@ -8,6 +8,7 @@ path so nothing ever touches the operator's real %LOCALAPPDATA% data.
 """
 import json
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -400,6 +401,28 @@ class TestPrivateBackupAndMigration:
 # Section 15/16 + 25(A, J): git protection + repo cleanliness
 # =============================================================================
 class TestGitProtection:
+    def test_precommit_scans_staged_blob_not_worktree(self, tmp_path, monkeypatch, capsys):
+        import pre_commit_secret_check as pcs
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+        assert git("init", "-q").returncode == 0
+        assert git("config", "user.name", "t").returncode == 0
+        assert git("config", "user.email", "t@local").returncode == 0
+        staged = repo / "config.json"
+        staged.write_text(json.dumps({"apiKey": _fake_sk()}), encoding="utf-8")
+        assert git("add", "config.json").returncode == 0
+
+        staged.write_text("benign worktree copy\n", encoding="utf-8")
+        monkeypatch.setattr(pcs, "REPO_ROOT", repo)
+
+        assert pcs.main() == 1
+        assert "COMMIT BLOCKED" in capsys.readouterr().out
+
     def test_git_history_report_tool(self):
         """25(J): history check reports a definitive verdict."""
         from check_git_history import check_history
