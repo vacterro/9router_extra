@@ -251,6 +251,24 @@ class TestScannerAndExports:
         }), encoding="utf-8")
         assert scan_file(fixture, tmp_path) == []
 
+    def test_scanner_source_names_are_not_exempt(self, tmp_path):
+        from core.secret_scanner import scan_file
+        from verify_agent_safe import verify_agent_safe
+
+        canary = _fake_sk()
+        wrapper = tmp_path / "tools" / "secret_scan.py"
+        nested = tmp_path / "nested" / "secret_scanner.py"
+        wrapper.parent.mkdir(parents=True)
+        nested.parent.mkdir(parents=True)
+        wrapper.write_text(json.dumps({"apiKey": canary}), encoding="utf-8")
+        nested.write_text(json.dumps({"apiKey": canary}), encoding="utf-8")
+
+        assert scan_file(wrapper, tmp_path)
+        assert scan_file(nested, tmp_path)
+        unsafe_paths = {u.path.replace("\\", "/") for u in verify_agent_safe(tmp_path)}
+        assert any("tools/secret_scan.py" in path for path in unsafe_paths)
+        assert any("nested/secret_scanner.py" in path for path in unsafe_paths)
+
     def test_saipen_op_marker_is_not_a_finding_but_bare_hex_is(self, tmp_path):
         """Precision (T-1 / SRC-001:R0015): the bare `[op: <32 lower hex>]`
         SAIOPS marker is protocol bookkeeping, not a credential, even when its

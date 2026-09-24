@@ -3,6 +3,11 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## 0.1.1
+
+### Security
+- Secret scanning now covers wrapper and nested scanner-like paths instead of exempting basenames.
+
 ## 0.1.0
 
 ### Added

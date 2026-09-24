@@ -335,10 +335,6 @@ def scan_file(path: Path, root: Optional[Path] = None) -> List[Finding]:
     rel = path.relative_to(root) if root and path.is_relative_to(root) else path  # type: ignore[attr-defined]
     name = str(rel).replace("\\", "/")
 
-    # This scanner's own source contains detection signatures by construction.
-    if path.name in ("secret_scanner.py", "secret_scan.py"):
-        return findings
-
     # Name-based private material (binary or not): flagged without content read.
     if PRIVATE_NAME_RE.search(name):
         findings.append(Finding(str(rel), "private_filename",
