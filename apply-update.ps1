@@ -1,5 +1,5 @@
 # ==============================================================================
-# 9Router Extra Upgrade Script (v0.5.65-extra)
+# 9Router Extra Upgrade Script (newest *-extra package; 0.5.91-extra since 2026-09-30)
 # Preserves all existing provider nodes, connections, and custom combo order.
 #
 # CORE-004: every native command is checked; any non-zero exit aborts BEFORE the
@@ -28,8 +28,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $PackagePath) {
-    $PackagePath = Join-Path $env:LOCALAPPDATA "9router_WatchEdit/engine/packages/9router-0.5.65-extra.tgz"
+    # The newest patched build in the engine folder (9router-<version>-extra.tgz), so a port to a new
+    # upstream release needs no edit here. 0.5.91-extra: the extras carried onto upstream 0.5.91 (ZAICODE T-135).
+    $packages = Join-Path $env:LOCALAPPDATA "9router_WatchEdit/engine/packages"
+    $newest = Get-ChildItem -LiteralPath $packages -Filter "9router-*-extra.tgz" -ErrorAction SilentlyContinue |
+        Sort-Object { [version](($_.Name -replace '^9router-', '') -replace '-extra\.tgz$', '') } -Descending |
+        Select-Object -First 1
+    $PackagePath = if ($newest) { $newest.FullName } else { Join-Path $packages "9router-0.5.91-extra.tgz" }
 }
+$PackageName = [IO.Path]::GetFileNameWithoutExtension($PackagePath)
 if (-not $BackupScript) {
     $BackupScript = Join-Path $PSScriptRoot "tools/create_safety_backup.ps1"
 }
@@ -78,7 +85,7 @@ function Invoke-NativeChecked {
 }
 
 Write-Host "=====================================================" -ForegroundColor Cyan
-Write-Host " 9Router Extra Upgrade to v0.5.65" -ForegroundColor Cyan
+Write-Host " 9Router Extra Upgrade to $PackageName" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 
 # 1. Stop running 9router processes
@@ -135,7 +142,7 @@ if (-not (Test-Path $PackagePath)) {
     Fail "Patched package not found at: $PackagePath"
 }
 
-Write-Host "`n[3/5] Installing 9router-0.5.65-extra globally via npm..." -ForegroundColor Yellow
+Write-Host "`n[3/5] Installing $PackageName globally via npm..." -ForegroundColor Yellow
 Invoke-NativeChecked -Label "npm install" -Exe $NpmExe -ExeArgs @("install", "-g", "--force", "$PackagePath") | Out-Null
 
 # 4. Synchronize database state (Connections preserved, Combos untouched)
@@ -169,7 +176,7 @@ if ($SkipLaunch) {
 }
 
 Write-Host "`n=====================================================" -ForegroundColor Green
-Write-Host " Upgrade complete! 9Router v0.5.65-extra is running." -ForegroundColor Green
+Write-Host " Upgrade complete! $PackageName is running." -ForegroundColor Green
 Write-Host " - User custom combo order preserved 100% intact" -ForegroundColor Green
 Write-Host " - Muse Spark stream failure & 60s timeout fallback active" -ForegroundColor Green
 Write-Host " - AMD DeepSeek/Qwen mid-system message folding active" -ForegroundColor Green
