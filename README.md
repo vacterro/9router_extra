@@ -1,5 +1,7 @@
 # 9Router Extra / Scanner & Integration Suite
 
+**Windows integration and patch suite for 9Router, focused on AI model-provider bridges, routing compatibility, SAIFREN configuration, state backup, and safe update/migration tooling.**
+
 Version: **v0.1.0**
 Project: 9router_extra
 Path: `V:\___VAC\__K\__CODE\_PY\_9router_extra\`
