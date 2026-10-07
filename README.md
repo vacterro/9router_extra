@@ -1,85 +1,69 @@
-# 9Router Extra / Scanner & Integration Suite
+<div align="center">
 
-**Windows integration and patch suite for 9Router, focused on AI model-provider bridges, routing compatibility, SAIFREN configuration, state backup, and safe update/migration tooling.**
+# 9Router Extra
 
-Version: **v0.1.0**
-Project: 9router_extra
-Path: `V:\___VAC\__K\__CODE\_PY\_9router_extra\`
+**Windows extension, patch, migration, and provider-integration suite for 9Router.**
 
-## Overview
-This repository contains extensions, tools, state backups, and patches for 9Router:
-1. **WorkBuddy AI (`wb/hy3`) Provider Bridge**
-   - Direct integration with WorkBuddy AI cloud completions (`https://www.workbuddy.ai/v2/chat/completions`).
-   - Supports Hunyuan reasoning model `hy3` (forces `stream: true`, typed content blocks, `reasoning_effort: high`, `reasoning_summary: auto`).
-   - Local token auto-import from `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop-ai.info`.
-   - Token refresh and quota tracking support.
-2. **Antigravity Gemini 3.8 Flash Fix & Dynamic Tier Resolution**
-   - Fixes upstream 404 issue: upstream Antigravity requires `gemini-3.8-flash-tiered(high|medium|low)`.
-   - Adds dynamic pattern matching so any `gemini-*-flash-(high|medium|low)` maps to tiered format without 404.
-3. **SAIFREN Combo Prepend**
-   - Configured `wb/hy3` as the 1st model and `ag/gemini-3.8-flash-high` as 2nd model in `SAIFREN`.
-4. **AgentRouter & Cline Patches**
-   - Native AgentRouter provider, client User-Agent forwarding, Anthropic base URL resolution, and Cline routing fixes.
-5. **State Backup & Migration Engine**
-   - Snapshot of all 36 connections, 13 custom nodes (B.AI, Dahl, Vyce, etc.), and combos.
+![Version](https://img.shields.io/badge/version-0.1.0-D4B86A?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)
+![Routing](https://img.shields.io/badge/focus-provider%20routing-6B5A2B?style=flat-square)
+![Security](https://img.shields.io/badge/repository-secret%20free-4A7A20?style=flat-square)
 
-## Structure
-- `apply-update.ps1` - 1-click update script to safely stop, backup, upgrade to v0.5.65-extra, restore state, and restart 9router.
-- `packages/`
-  - `9router-0.5.65-extra.tgz` - Fully built, patched v0.5.65 package ready for global install.
-  - `9router-0.5.59-agentrouter.tgz` - Legacy v0.5.59 package.
-- `patches/`
-  - `9router-0.5.65-extra-unified.patch` - Unified patch against v0.5.65 upstream.
-  - `9router-extra-unified.patch` - Unified patch against v0.5.59.
-- `backup/`
-  - `export_state.js` & `restore_state.js` - SQLite state backup and sync tools
-    (private state now targets `%LOCALAPPDATA%\9router_WatchEdit\backups\private\`, never this repository).
+[Security model](SECURITY_LOCAL.md) · [Apply update](#apply-an-update) · [Testing note](#source-test-invocation) · [Issues](https://github.com/vacterro/9router_extra/issues)
 
-## Running the 9Router source tests (vitest invocation trap, T-21)
-The Next.js dashboard source lives in `%APPDATA%\9router\source`. Its vitest
-path aliases (`@/` → `src`, `open-sse` → `open-sse`) are defined ONLY in
-`tests/vitest.config.js`.
+</div>
 
-**Do NOT invoke the binary from the source root:**
-```powershell
-# WRONG: bypasses tests/vitest.config.js, every "@/..." import fails
-.\tests\node_modules\.bin\vitest.cmd run tests/unit/model-test-routing.test.js
-#   -> Error: Cannot find package '@/shared/constants/config' imported from
-#      src/app/api/models/test/ping.js
-```
+## What this repository contains
 
-Use the config-aware invocation instead:
-```powershell
-# RIGHT: loads tests/vitest.config.js (aliases resolve)
-npm --prefix tests test -- unit/model-test-routing.test.js
-```
+9Router Extra is the local integration layer around a pinned 9Router build. It carries provider bridges, routing patches, migration helpers, safe state tooling, and a reproducible update path without checking private credentials into Git.
 
-A root-level `vitest.config.js` that re-exports the tests config also makes the
-root binary work; it is kept in the source tree so both invocations agree.
-`tests/unit/model-routing.test.js` has an unrelated pre-existing `EPERM` on
-`os.tmpdir()` teardown in this environment — it fails identically under both
-invocations and is not an alias problem.
+Current patch work includes:
+
+- provider bridge and routing compatibility fixes;
+- SAIFREN ordering/configuration integration;
+- AgentRouter and Cline interoperability patches;
+- state export/restore helpers;
+- a packaged patched 9Router build plus unified patch artifacts.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `apply-update.ps1` | stop → backup → install patched build → restore/sync → restart |
+| `packages/` | pinned packaged builds used by the update flow |
+| `patches/` | unified patches against supported upstream versions |
+| `backup/` | state export/restore helpers; private backup data remains outside Git |
+| `tools/` | validation, sharing, and local maintenance helpers |
 
 ## Security model
-This repository is secret-free and safe to hand to external coding agents.
-Secrets live only in the local runtime layer (`%LOCALAPPDATA%\9router_WatchEdit\` and the
-9Router install). WatchEdit runs `SECRETS: LOCKED` by default; live provider operations
-require an explicit unlock (OS-backed grant or optional master-password vault).
-See **SECURITY_LOCAL.md** for the full model, the SAFE share builder
-(`python tools/build_safe_share.py`), the secret scanner, and private-backup tooling.
-  - `data-snapshot/` - Full database copy of `%APPDATA%\9router\db\data.sqlite`.
 
-## How to Apply Update
-When your active tasks in 9router are finished, simply run:
+This repository is intended to remain **secret-free** and safe to hand to an external coding agent.
+
+Credentials and private runtime state belong under the local runtime layer, not in Git. Live provider operations stay locked until explicitly enabled. See [SECURITY_LOCAL.md](SECURITY_LOCAL.md) for the sharing model, secret scanning, and private-backup rules.
+
+## Apply an update
+
+Run the update only when active 9Router work is idle:
+
 ```powershell
 .\apply-update.ps1
 ```
-This will:
-1. Stop the running 9router instance.
-2. Create a timestamped backup in `%APPDATA%\9router_backup_<timestamp>`.
-3. Install `9router-0.5.65-extra.tgz` globally.
-4. Synchronize all connections and update the SAIFREN combo.
-5. Restart 9router in tray mode.
+
+The script creates a timestamped backup, installs the pinned patched package, synchronizes state/configuration, and restarts 9Router.
+
+## Source test invocation
+
+The 9Router dashboard source defines its Vitest aliases in `tests/vitest.config.js`. Use the config-aware test entry point:
+
+```powershell
+npm --prefix tests test -- unit/model-test-routing.test.js
+```
+
+Running the bare Vitest binary from the source root can bypass those aliases and produce misleading import failures. That is a test-invocation problem, not necessarily a product regression.
+
+## Scope
+
+This is an integration/patch repository, not an upstream replacement. Pinned package versions and provider behavior can age faster than the README, so the package/patch files in the repository are the authoritative artifacts for an exact checkout.
 
 <!-- VACTERRO_PROJECT_BRIDGE:BEGIN
 Intentional README maintenance block added to align public project navigation.
