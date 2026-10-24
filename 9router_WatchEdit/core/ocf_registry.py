@@ -178,11 +178,17 @@ class OcfRegistry:
         if not isinstance(entries, dict):
             self.load_error = "entries_missing"
             return
+        known = set(OcfEntry.__dataclass_fields__)
+        invalid: List[str] = []
         for key, raw in entries.items():
             if not isinstance(raw, dict) or not isinstance(raw.get("model_id"), str):
+                # Rejected entries are NAMED in load_error (T-97): a dropped
+                # row must never leave the registry reporting a clean load.
+                invalid.append(str(key))
                 continue
-            known = set(OcfEntry.__dataclass_fields__)
             self.entries[str(key)] = OcfEntry(**{k: v for k, v in raw.items() if k in known})
+        if invalid:
+            self.load_error = "invalid_entries:" + ",".join(sorted(invalid))
         self.last_reconcile = data.get("last_reconcile") or {}
         self.last_sync = data.get("last_sync") or {}
 

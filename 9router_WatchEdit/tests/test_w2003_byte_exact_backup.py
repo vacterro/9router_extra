@@ -119,6 +119,108 @@ def test_extract_rejects_repo_destination(tmp_path, monkeypatch):
         cpb.extract_private_backup(out, "master-pass-123", REPO_ROOT)
 
 
+def _case_variant(path: Path) -> Path:
+    """Same directory, opposite letter case: equal on case-insensitive FS."""
+    s = str(path)
+    return Path(s.swapcase()) if s.lower() != s.upper() else path
+
+
+def test_case_variant_repo_destination_refused_everywhere(tmp_path, monkeypatch):
+    """T-99: a case-variant in-repo destination must be refused at both the
+    create and the extract boundary, exactly like the exact-match path."""
+    import create_private_backup as cpb
+    data_dir = tmp_path / "localdata"
+    _isolate_sources(monkeypatch, cpb, data_dir)
+    _make_binary_sources(data_dir)
+
+    in_repo = _case_variant(REPO_ROOT / "leaked_backup")
+    with pytest.raises(ValueError):
+        cpb.create_private_backup("master-pass-123", out_dir=in_repo)
+
+    out = cpb.create_private_backup("master-pass-123", out_dir=tmp_path / "private_backups")
+    with pytest.raises(ValueError):
+        cpb.extract_private_backup(out, "master-pass-123", _case_variant(REPO_ROOT))
+
+
+def _craft_wvault(path: Path, password: str, entries: dict) -> Path:
+    """Build a well-formed .wvault whose entry names are attacker-chosen.
+
+    Mirrors the real container layout (encrypted payload.vault + plaintext
+    manifest.json), so only the entry NAME is hostile.
+    """
+    import base64 as b64
+    import hashlib as hl
+    import json
+    import zipfile
+    from core.secret_store import VaultStore
+
+    payload = path.parent / ".crafted_payload.vault"
+    VaultStore(payload).create(password, secrets=entries)
+    try:
+        manifest = {
+            "created": "2026-01-01T00:00:00",
+            "entry_count": len(entries),
+            "entries": [
+                {
+                    "path": rel,
+                    "encoding": "base64",
+                    "size_bytes": len(b64.b64decode(value.encode("ascii"))),
+                    "sha256": hl.sha256(b64.b64decode(value.encode("ascii"))).hexdigest(),
+                }
+                for rel, value in entries.items()
+            ],
+            "crypto": "argon2id + aes-256-gcm",
+            "encoding": "base64",
+        }
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("WARNING.txt", "crafted test container\n")
+            zf.write(payload, "payload.vault")
+            zf.writestr("manifest.json", json.dumps(manifest))
+    finally:
+        payload.unlink(missing_ok=True)
+    return path
+
+
+def test_extract_refuses_entry_escaping_destination(tmp_path, monkeypatch):
+    """T-98: a crafted archive must never write outside the restore root."""
+    import base64 as b64
+    import create_private_backup as cpb
+    data_dir = tmp_path / "localdata"
+    _isolate_sources(monkeypatch, cpb, data_dir)
+
+    escape = ".." + os.sep + "escaped.txt"
+    crafted = _craft_wvault(
+        tmp_path / "crafted.wvault", "master-pass-123", {escape: b64.b64encode(b"evil").decode("ascii")}
+    )
+
+    dest = tmp_path / "restore_root"
+    with pytest.raises(ValueError):
+        cpb.extract_private_backup(crafted, "master-pass-123", dest)
+
+    # Nothing was written above the restore root.
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_extract_refuses_absolute_entry_path(tmp_path, monkeypatch):
+    """T-98: an absolute entry name must not be honoured either."""
+    import base64 as b64
+    import create_private_backup as cpb
+    data_dir = tmp_path / "localdata"
+    _isolate_sources(monkeypatch, cpb, data_dir)
+
+    absolute = str(tmp_path / "absolute_escape.txt")
+    crafted = _craft_wvault(
+        tmp_path / "crafted_abs.wvault",
+        "master-pass-123",
+        {absolute: b64.b64encode(b"evil2").decode("ascii")},
+    )
+
+    with pytest.raises(ValueError):
+        cpb.extract_private_backup(crafted, "master-pass-123", tmp_path / "restore_root2")
+
+    assert not Path(absolute).exists()
+
+
 def test_text_sources_still_round_trip(tmp_path, monkeypatch):
     import create_private_backup as cpb
     data_dir = tmp_path / "localdata"

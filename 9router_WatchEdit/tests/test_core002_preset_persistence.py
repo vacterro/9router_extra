@@ -82,6 +82,44 @@ def test_valid_file_loads_without_seeding(tmp_path):
 # ---------------------------------------------------------------------------
 # save(): truthful failure
 # ---------------------------------------------------------------------------
+def test_successive_corruption_uses_one_quarantine_slot(tmp_path):
+    presets_file = tmp_path / "presets.json"
+    slot = presets_file.with_name(presets_file.name + ".corrupt")
+    slot.write_bytes(b"previous incident")
+
+    first = b"{broken"
+    presets_file.write_bytes(first)
+    pm = _pm(tmp_path)
+    assert Path(pm.quarantine_path).read_bytes() == first
+
+    # A later incident reuses the slot instead of spawning .corrupt.2.
+    second = b"[also broken"
+    presets_file.write_bytes(second)
+    pm = _pm(tmp_path)
+    assert pm.load_state is PresetLoadState.MALFORMED_JSON
+    assert Path(pm.quarantine_path).read_bytes() == second
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        [presets_file.name, slot.name]
+    )
+
+
+def test_unwritable_quarantine_slot_keeps_source_without_accumulating(tmp_path):
+    presets_file = tmp_path / "presets.json"
+    presets_file.write_bytes(b"{broken")
+    slot = presets_file.with_name(presets_file.name + ".corrupt")
+    slot.mkdir()  # occupy the single slot -> the quarantine write must fail
+
+    for _ in range(2):
+        pm = _pm(tmp_path)
+        assert pm.load_state is PresetLoadState.MALFORMED_JSON
+        assert "quarantine failed" in pm.load_error
+        assert pm.quarantine_path is None
+        # The corrupt source is never replaced when its bytes could not be
+        # preserved, and no .corrupt.2 fallback copy accumulates.
+        assert presets_file.read_bytes() == b"{broken"
+        assert sorted(p.name for p in tmp_path.iterdir()) == [presets_file.name, slot.name]
+
+
 def test_unwritable_destination_raises_and_reports_stage(tmp_path, monkeypatch):
     pm = _pm(tmp_path)
     pm.presets["X"] = Preset(name="X", models=["m"], description="", updated_at="t")

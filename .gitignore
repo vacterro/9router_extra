@@ -42,6 +42,17 @@ build/
 #      must stay tracked; everything else under .saipen/ is local state) ---
 .saipen/*
 !.saipen/IDENTITY.md
+# --- Release surface: the translation kitchen's verified locale READMEs are
+#      part of the release contract (the ship gate requires every one of them
+#      staged and committed so a fresh clone exposes them), so they must be
+#      trackable even though the rest of .saipen/ is local state. Only the
+#      surfaces themselves -- no cache, no scratch, no state. ---
+!.saipen/saitranslate/
+.saipen/saitranslate/*
+!.saipen/saitranslate/kitchen/
+.saipen/saitranslate/kitchen/*
+!.saipen/saitranslate/kitchen/*/
+!.saipen/saitranslate/kitchen/*/README_*.md
 .idea/
 .vscode/
 

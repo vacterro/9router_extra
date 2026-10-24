@@ -101,7 +101,7 @@ def test_scan_failed_end_to_end_redacted_status(qapp, monkeypatch, tmp_path):
     msg = window.status_bar.currentMessage()
     assert msg.startswith("Scan failed")
     # Redacted diagnostic, never the raw secret
-    assert "[REDACTED]" in msg
+    assert "<REDACTED>" in msg
     assert "sk-abcdefghijklmnop1234" not in msg
     # Terminal FAILED message survived (not overwritten by a generic completed text)
     assert "internal crash" in msg

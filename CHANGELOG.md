@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## 0.2.0
+
+### Added
+- Rich Model Explorer for the combo editor: independent per-panel search,
+  provider multi-select filtering, activation/health/cost filters, sorting and
+  grouping, live result counts and power-user actions over the model catalog.
+
 ## 0.1.1
 
 ### Security

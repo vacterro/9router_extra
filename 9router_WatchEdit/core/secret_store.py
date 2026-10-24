@@ -154,23 +154,34 @@ def dpapi_unprotect(data: bytes, entropy: bytes = b"") -> bytes:
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)  # type: ignore[arg-type]
 
 
-def restrict_to_current_user(path: Path) -> None:
+def restrict_to_current_user(path: Path) -> Optional[str]:
     """Best-effort NTFS ACL: remove inheritance, grant only the current user.
-    Directory grants carry (OI)(CI) inheritance flags; file grants must not."""
+    Directory grants carry (OI)(CI) inheritance flags; file grants must not.
+
+    T-88: returns None on success and a short reason on failure. A bare
+    ``except Exception: pass`` reported nothing at all, so a file whose
+    ACLs never got hardened looked identical to one that did -- the
+    defense-in-depth layer could be silently absent on exactly the
+    secrets that most need it.
+    """
     if not IS_WINDOWS:
-        return
+        return None
     try:
         import subprocess
         user = os.environ.get("USERNAME", "")
         if not user:
-            return
+            return "no USERNAME in environment; ACL not applied"
         grant = f"{user}:(OI)(CI)F" if Path(path).is_dir() else f"{user}:F"
-        subprocess.run(
+        result = subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", grant],
             capture_output=True, check=False, timeout=15,
         )
-    except Exception:
-        pass  # ACL hardening is defense-in-depth; DPAPI/vault crypto remains primary
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace").strip()
+            return f"icacls exit {result.returncode}: {detail[:200]}"
+        return None
+    except Exception as exc:  # noqa: BLE001 -- reported, never swallowed
+        return f"{type(exc).__name__}: {exc}"
 
 
 class DPAPIFileStore:

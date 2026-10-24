@@ -696,6 +696,70 @@ class TestGate11HistoryRemediation:
         assert rg.main(["--repo", str(REPO_ROOT), "--purge", "x",
                         "--i-understand-this-rewrites-history"]) == 2
 
+    def test_post_rewrite_failure_is_not_reported_as_success(self, tmp_path, monkeypatch):
+        # T-83: filter-branch succeeding is not remediation succeeding. While
+        # refs/original survives and the reflog still holds the commits, the
+        # purged blob is reachable, so a discarded exit code from those steps
+        # reported "History rewritten" over a still-contaminated repo.
+        import subprocess as sp
+        import remediate_git_history as rg
+        repo = make_mini_repo(tmp_path, "g11fail")
+        real = sp.run
+
+        def flaky(args, **kwargs):
+            if args[1:3] == ["-C", str(repo)] and args[3] == "gc":
+                class Failed:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "gc exploded"
+                return Failed()
+            return real(args, **kwargs)
+
+        monkeypatch.setattr(rg.subprocess, "run", flaky)
+        assert rg.remediate(repo, ["leak.txt"]) is False
+
+    def test_purged_blob_is_unreachable_after_remediation(self, tmp_path):
+        import remediate_git_history as rg
+        repo = make_mini_repo(tmp_path, "g11gc")
+        (repo / "leak.txt").write_text("key: fake\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "B leak")
+        git(repo, "rm", "-q", "leak.txt")
+        git(repo, "commit", "-m", "C remove")
+        blob = git(repo, "rev-parse", "HEAD~1:leak.txt").stdout.strip()
+        assert blob
+
+        assert rg.remediate(repo, ["leak.txt"]) is True
+
+        # no reachable object still carries the purged blob
+        objects = git(repo, "rev-list", "--objects", "--all").stdout
+        assert blob not in objects
+        assert "refs/original" not in git(repo, "for-each-ref").stdout
+        # and it is gone from the object store, not merely unreferenced
+        assert git(repo, "cat-file", "-t", blob).stdout.strip() == ""
+
+    def test_purge_paths_are_shell_quoted(self, monkeypatch):
+        import shlex
+        import remediate_git_history as rg
+        seen = {}
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "injected failure"
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            return Result()
+
+        monkeypatch.setattr(rg.subprocess, "run", fake_run)
+        malicious = "leak'; touch pwn; echo '"
+        assert rg.remediate(Path("disposable"), [malicious]) is False
+        index = seen["args"].index("--index-filter")
+        assert seen["args"][index + 1] == (
+            f"git rm -r --cached --ignore-unmatch -- {shlex.quote(malicious)}"
+        )
+
 
 # =============================================================================
 # GATE 12 — nested repository policy

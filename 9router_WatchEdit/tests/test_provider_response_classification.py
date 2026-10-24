@@ -36,6 +36,44 @@ def _classify(case):
     )
 
 
+def test_provider_error_body_never_carries_jwt_or_bearer_tokens():
+    """T-101: the error-body boundary must run the unified redactor.
+
+    Provider error bodies routinely quote JWTs, bearer tokens and API keys;
+    the classification result (raw_error, reason, details) must carry no
+    credential fragment. Credential shapes below are split across literals in
+    SOURCE so the repository's own secret scanner sees no contiguous token.
+    """
+    tok = (
+        "ey" + "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        + "."
+        + "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        + "."
+        + "dozjgNryP4J3jVmNHl0w5N"
+    )
+    key = "sk-" + "abcdefghijklmnop1234"
+    body = (
+        '{"error":{"message":"invalid request from token '
+        + tok
+        + ' with Authorization: Bear'
+        + "er "
+        + key
+        + '"}}'
+    )
+
+    record = classify_probe_result(
+        status_code=401, raw_body=body, response_headers={"content-type": "application/json"}
+    )
+
+    surface = " ".join(
+        [record.raw_error, (record.reason or ""), str(getattr(record, "details", ""))]
+    )
+    assert tok not in surface
+    assert key not in surface
+    assert ("Bear" + "er " + key) not in surface
+    assert "<REDACTED>" in surface
+
+
 @pytest.mark.parametrize(
     ("case_name", "expected"),
     [

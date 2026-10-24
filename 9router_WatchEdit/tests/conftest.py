@@ -23,3 +23,13 @@ def _disable_main_window_startup_refresh(monkeypatch):
     from ui.main_window import MainWindow
 
     monkeypatch.setattr(MainWindow, "refresh_all_async", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_activation_store(monkeypatch, tmp_path):
+    """Keep the per-combo activation record out of the operator's real private
+    storage: a test must never publish a fake combo's activation state."""
+    import config
+
+    monkeypatch.setattr(config, "COMBO_ACTIVATION_FILE", tmp_path / "combo_activation.json")
+    yield

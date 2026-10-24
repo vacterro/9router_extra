@@ -105,6 +105,10 @@ LOCALAPPDATA_DIR = _private_root if PRIVATE_STORAGE_AVAILABLE else _UNAVAILABLE_
 HEALTH_CACHE_FILE = LOCALAPPDATA_DIR / "health_cache.json"
 PRESETS_FILE = LOCALAPPDATA_DIR / "presets.json"
 SETTINGS_FILE = LOCALAPPDATA_DIR / "settings.json"
+# Per-combo model activation (configured sequence + manual ON/OFF). Private
+# runtime state: the engine has no native activation field, so this file is the
+# authoritative record behind the projection published into combo.models.
+COMBO_ACTIVATION_FILE = LOCALAPPDATA_DIR / "combo_activation.json"
 BACKUP_DIR = LOCALAPPDATA_DIR / "db_backups"
 
 # Secret isolation layout (task: SECRET ISOLATION + SAFE EXTERNAL DEVELOPMENT MODE)
@@ -164,14 +168,6 @@ FAILURE_STREAK_FOR_DEAD = 3
 PROBE_MAX_TOKENS = 1024  # Reasoning models require headroom to avoid false empty choices
 PROBE_PROMPT = "hi"
 
-# Secret Redaction Patterns
-REDACT_PATTERNS = [
-    re.compile(r'(?i)(bearer\s+)[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE),
-    re.compile(r'sk-[a-zA-Z0-9_\-\.]{12,}'),
-    re.compile(r'9r-[a-zA-Z0-9_\-\.]{8,}'),
-    re.compile(r'(?i)kira_[a-zA-Z0-9_\-\.]{8,}'),
-]
-
 # Reasoning Model Patterns - models that need extended timeout
 REASONING_MODEL_PATTERNS = [
     re.compile(r'swe-1\.6-slow', re.IGNORECASE),
@@ -180,10 +176,12 @@ REASONING_MODEL_PATTERNS = [
 ]
 
 def redact_secrets(text: str) -> str:
-    """Redacts API keys, tokens, and sensitive headers from log/error text."""
-    if not text:
-        return ""
-    cleaned = str(text)
-    for pattern in REDACT_PATTERNS:
-        cleaned = pattern.sub('[REDACTED]', cleaned)
-    return cleaned
+    """Redacts credential-shaped text (keys, tokens, JWTs, basic-auth URLs).
+
+    Delegates to the unified boundary in core.redaction (T-101): the old
+    four-pattern list here missed JWTs and other credential shapes that
+    provider error bodies carry.
+    """
+    # Local import: core.redaction must not import config (cycle).
+    from core.redaction import redact_text
+    return redact_text(text or "")

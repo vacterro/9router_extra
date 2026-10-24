@@ -109,9 +109,86 @@ class StableCombo:
         self.baseline_updated_at: str = baseline_updated_at if baseline_updated_at is not None else updated_at
         self.baseline_name: str = baseline_name if baseline_name is not None else name
         self.baseline_kind: Optional[str] = baseline_kind if baseline_kind is not None else kind
+        # Per-combo manual activation. ``self.models`` stays the FULL configured
+        # sequence, so disabling never removes a model from the combo: it only
+        # takes the member out of what gets published to the engine.
+        self.disabled: set = set()
+        self.baseline_disabled: set = set()
+
+    # ------------------------------------------------------ activation state
+    def effective_models(self) -> List[str]:
+        """The sequence actually published to the engine: configured order with
+        the locally disabled members removed. This -- never ``self.models`` --
+        is what routing sees, so it is what every read-back compares against."""
+        return [m for m in self.models if m not in self.disabled]
+
+    def effective_baseline(self) -> List[str]:
+        """The engine sequence as of the last verified save."""
+        return [m for m in self.baseline_models if m not in self.baseline_disabled]
+
+    def is_model_enabled(self, canonical_id: str) -> bool:
+        return canonical_id not in self.disabled
+
+    def disabled_models(self) -> List[str]:
+        """Disabled members in configured order, so the list never re-sorts."""
+        return [m for m in self.models if m in self.disabled]
+
+    def set_model_enabled(self, canonical_id: str, enabled: bool) -> bool:
+        """Turn one configured member on/off. Returns True when state changed.
+
+        A member the combo does not configure is ignored: activation describes
+        configuration, it never invents a member.
+        """
+        if canonical_id not in self.models:
+            return False
+        if enabled:
+            if canonical_id not in self.disabled:
+                return False
+            self.disabled.discard(canonical_id)
+            return True
+        if canonical_id in self.disabled:
+            return False
+        self.disabled.add(canonical_id)
+        return True
+
+    def set_models_enabled(self, canonical_ids: List[str], enabled: bool) -> List[str]:
+        """Bulk activation; returns the ids that actually changed."""
+        return [c for c in canonical_ids if self.set_model_enabled(c, enabled)]
+
+    def toggle_models(self, canonical_ids: List[str]) -> List[str]:
+        """Flip each member's activation; returns the ids that changed."""
+        return [
+            c for c in canonical_ids
+            if c in self.models and self.set_model_enabled(c, not self.is_model_enabled(c))
+        ]
+
+    def reset_activation(self) -> List[str]:
+        """Re-enable every member. Returns the ids that were disabled."""
+        restored = self.disabled_models()
+        self.disabled.clear()
+        return restored
+
+    def has_no_routable_models(self) -> bool:
+        """True when the published projection would be empty.
+
+        The engine resolves an empty ``models`` array to no combo at all, so
+        this is a state the UI must guard rather than apply silently.
+        """
+        return not self.effective_models()
+
+    def activation_counts(self, routable_ids: Optional[set] = None) -> Dict[str, int]:
+        """Configured / enabled / routable / disabled for the counts line."""
+        enabled = self.effective_models()
+        return {
+            "configured": len(self.models),
+            "enabled": len(enabled),
+            "disabled": len(self.models) - len(enabled),
+            "routable": (sum(1 for m in enabled if m in routable_ids)
+                         if routable_ids is not None else len(enabled)),
+        }
 
     def clone(self) -> "StableCombo":
-        return StableCombo(
+        clone = StableCombo(
             combo_id=self.id,
             name=self.name,
             models=list(self.models),
@@ -122,10 +199,14 @@ class StableCombo:
             baseline_name=self.baseline_name,
             baseline_kind=self.baseline_kind,
         )
+        clone.disabled = set(self.disabled)
+        clone.baseline_disabled = set(self.baseline_disabled)
+        return clone
 
     def mark_clean(self, new_updated_at: str = ""):
-        """Marks current local state (name, kind, models) as clean baseline."""
+        """Marks current local state (name, kind, models, activation) as clean baseline."""
         self.baseline_models = list(self.models)
+        self.baseline_disabled = set(self.disabled)
         self.baseline_name = self.name
         self.baseline_kind = self.kind
         if new_updated_at:
@@ -133,9 +214,10 @@ class StableCombo:
             self.updated_at = new_updated_at
 
     def has_unsaved_changes(self) -> bool:
-        """Returns True if local model sequence, name, or kind differs from baseline."""
+        """Returns True if local sequence, activation, name, or kind differs from baseline."""
         return (
             self.models != self.baseline_models
+            or self.disabled != self.baseline_disabled
             or self.name != self.baseline_name
             or self.kind != self.baseline_kind
         )
@@ -157,13 +239,17 @@ class StableCombo:
         the project's normalization (None and "" are equivalent). This is the
         complete APPLY/VERIFY contract used before ``mark_clean``: a partial
         backend write/normalization must not be laundered into a clean baseline.
+
+        ``models`` is compared against the effective projection, because that
+        is what the engine is actually asked to store; the configured sequence
+        keeps its disabled members locally and is never what is written.
         """
         mismatches: List[str] = []
         if server_name != self.name:
             mismatches.append("name")
         if self._normalize_kind(server_kind) != self._normalize_kind(self.kind):
             mismatches.append("kind")
-        if list(server_models or []) != list(self.models):
+        if list(server_models or []) != self.effective_models():
             mismatches.append("models")
         return mismatches
 
@@ -178,7 +264,7 @@ class StableCombo:
         Returns True if server state diverges from local baseline (optimistic concurrency conflict).
         Checks models, name, kind, and updatedAt (if present).
         """
-        if server_models != self.baseline_models:
+        if server_models != self.effective_baseline():
             return True
         if server_name != self.baseline_name:
             return True
@@ -201,10 +287,11 @@ class StableCombo:
             changes.append(f"name '{self.baseline_name}' -> '{server_name}'")
         if (server_kind or None) != (self.baseline_kind or None):
             changes.append(f"kind '{self.baseline_kind}' -> '{server_kind}'")
-        if server_models != self.baseline_models:
-            baseline_set = set(self.baseline_models)
+        baseline_effective = self.effective_baseline()
+        if server_models != baseline_effective:
+            baseline_set = set(baseline_effective)
             server_set = set(server_models)
-            removed = [m for m in self.baseline_models if m not in server_set]
+            removed = [m for m in baseline_effective if m not in server_set]
             added = [m for m in server_models if m not in baseline_set]
             if removed:
                 changes.append(f"models removed: {', '.join(removed)}")
@@ -217,8 +304,9 @@ class StableCombo:
         return changes
 
     def revert_unsaved_changes(self):
-        """Reverts local state to baseline sequence."""
+        """Reverts local state to the baseline sequence and activation."""
         self.models = list(self.baseline_models)
+        self.disabled = set(self.baseline_disabled)
         self.name = self.baseline_name
         self.kind = self.baseline_kind
 
@@ -235,6 +323,9 @@ class StableCombo:
     def remove_model(self, canonical_id: str) -> bool:
         if canonical_id in self.models:
             self.models.remove(canonical_id)
+            # Removing IS destructive: the member leaves the configuration, so
+            # its activation record goes with it. Disabling never does this.
+            self.disabled.discard(canonical_id)
             return True
         return False
 
@@ -246,6 +337,7 @@ class StableCombo:
             if remaining[model] > 0:
                 remaining[model] -= 1
                 removed += 1
+                self.disabled.discard(model)
             else:
                 kept.append(model)
         if removed:
@@ -389,16 +481,13 @@ class PresetManager:
 
     # ------------------------------------------------------------- loading
     def _quarantine_target(self) -> Path:
-        """Deterministic recovery name (first free when one already exists)."""
-        base = self.presets_file.with_name(self.presets_file.name + self.QUARANTINE_SUFFIX)
-        if not base.exists():
-            return base
-        n = 2
-        while True:
-            candidate = base.with_name(base.name + f".{n}")
-            if not candidate.exists():
-                return candidate
-            n += 1
+        """Deterministic recovery name: one slot, overwritten per incident.
+
+        A bounded single slot keeps quarantine copies from accumulating as
+        ``.corrupt.2``, ``.corrupt.3``, ... over successive incidents
+        (same class as T-102 in HealthCache).
+        """
+        return self.presets_file.with_name(self.presets_file.name + self.QUARANTINE_SUFFIX)
 
     def _seed_defaults(self) -> None:
         now = datetime.now().isoformat()

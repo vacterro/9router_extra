@@ -233,6 +233,10 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._load_settings()
+        # The Combo workspace restores its remembered view only after both the
+        # editor and the settings file exist (the file may set the geometry that
+        # decides the panels' compact mode).
+        self._restore_combo_display_prefs()
 
         # Instant startup (<100ms) from local persisted state only; live
         # work happens strictly on explicit user actions (T-33).
@@ -1652,8 +1656,17 @@ class MainWindow(QMainWindow):
                 geom = data.get("geometry")
                 if geom:
                     self.setGeometry(*geom)
+                # Combo workspace display preferences: search, filters, sort.
+                # Persisted only as presentation, never as combo order.
+                self._restored_combo_prefs = data.get("combo_explorer")
             except Exception:
                 pass
+
+    def _restore_combo_display_prefs(self):
+        """Apply remembered Combo view preferences, once the editor exists."""
+        prefs = getattr(self, "_restored_combo_prefs", None)
+        if isinstance(prefs, dict):
+            self.combo_editor.apply_display_prefs(prefs)
 
     def closeEvent(self, event):
         # FREE scan evidence is checkpointed in bounded batches. Closing owns a
@@ -1713,6 +1726,9 @@ class MainWindow(QMainWindow):
         try:
             rect = self.geometry()
             data = {"geometry": [rect.x(), rect.y(), rect.width(), rect.height()]}
+            # Remember how the Combo workspace was laid out (search/filter/sort
+            # only). Never the engine's combo order.
+            data["combo_explorer"] = self.combo_editor.export_display_prefs()
             SETTINGS_FILE.write_text(json.dumps(data), encoding="utf-8")
         except Exception:
             pass

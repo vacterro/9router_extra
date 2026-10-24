@@ -1,6 +1,6 @@
 # 9Router Extra / Scanner & Integration Suite
 
-Version: **v0.1.1**
+Version: **v0.2.0**
 Project: 9router_extra
 Path: `V:\___VAC\__K\__CODE\_PY\_9router_extra\`
 
@@ -66,6 +66,45 @@ require an explicit unlock (OS-backed grant or optional master-password vault).
 See **SECURITY_LOCAL.md** for the full model, the SAFE share builder
 (`python tools/build_safe_share.py`), the secret scanner, and private-backup tooling.
   - `data-snapshot/` - Full database copy of `%APPDATA%\9router\db\data.sqlite`.
+
+## WorkBuddy channel verification (HTTP 400 / code 11128)
+WorkBuddy's gateway now rejects chat requests that do not carry the official
+desktop client's identity headers, answering `HTTP 400` with
+`{"code":11128,"msg":"request illegal"}` and
+"This call failed channel verification ... not sent from an official client."
+9router's workbuddy executor still sent the old CodeBuddy CLI fingerprint
+(`User-Agent: CLI/2.108.1 CodeBuddy/2.108.1`, `X-IDE-Type: CLI`), so every
+WorkBuddy model failed the check.
+
+`open-sse/executors/workbuddy.js` now carries the official WorkBuddy 5.8.4
+desktop identity, so every `9router-*-extra` build ships it: the
+`WorkBuddy/5.8.4 workbuddy-ai/...` User-Agent, `X-IDE-Type/Name: WorkBuddy`,
+agent intent headers, and the conversation/request/trace header family
+(`X-Conversation-ID`, `X-Conversation-Request-ID`, `X-Conversation-Message-ID`,
+`X-Request-ID`, `X-Trace-ID`, `b3`). Conversation ids stay stable per account;
+per-request ids are fresh, as in the official client. The same identity is in
+the `workbuddy` registry transport headers, so it survives an upgrade without a
+post-install patch.
+
+`tools/patch_workbuddy_client_identity.py` remains as the runtime repair path
+for an install built from an older package; `--check` reports `BUILT-IN` when
+the identity already ships in the build.
+
+```powershell
+python tools/patch_workbuddy_client_identity.py --check    # BUILT-IN or needs patching?
+python tools/patch_workbuddy_client_identity.py --apply    # patch + backup, then restart 9router
+python tools/patch_workbuddy_client_identity.py --verify   # live-test wb/deepseek-v4.1-flash and wb/hy3
+python tools/patch_workbuddy_client_identity.py --restore  # roll back to the newest backup
+```
+
+Backups land in `%LOCALAPPDATA%\9router_WatchEdit\engine\rollback`.
+
+Passing the channel check is necessary but not sufficient: WorkBuddy also
+answers `HTTP 403` with `{"code":11140,"msg":"request illegal"}` and
+"Your account has been restricted due to unusual activity" when it has flagged
+the account itself. That check is server-side and cannot be worked around from
+9router; it clears only through an appeal in the official client
+(`SUBMIT_FEEDBACK` in the error payload).
 
 ## How to Apply Update
 When your active tasks in 9router are finished, simply run:

@@ -157,10 +157,15 @@ def test_combo_controls_survive_tab_refactor(qapp, tmp_path):
         "btn_add_to_combo", "btn_retest_combo",
     ):
         assert getattr(view, attr) is not None, attr
-    # Picker filter is one labeled dropdown with the T-33 option set
+    # T-104: the single Usable|Free|Paid|... dropdown became the health filter of
+    # two independent panels. Cost/Untested/Routing/Latency live beside it as
+    # separately composable controls, so health keeps its own taxonomy only.
     assert [view.cb_picker_filter.itemText(i) for i in range(view.cb_picker_filter.count())] == [
-        "Usable", "Free", "Paid", "Untested", "Attention", "Dead", "All"
+        "All", "Usable", "Untested", "Attention", "Dead"
     ]
+    assert view.available_controls.cb_cost.count() > 1  # cost is its own filter
+    assert view.combo_controls.search.edit is not None
+    assert view.available_controls.search.edit is not None
     view.close()
 
 

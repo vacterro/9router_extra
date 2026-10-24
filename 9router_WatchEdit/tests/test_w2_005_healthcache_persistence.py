@@ -308,7 +308,7 @@ def test_load_io_failure_is_not_a_clean_empty_cache(tmp_path):
         cache_file.rmdir()
 
 
-def test_load_invalid_record_keeps_earlier_quarantine(tmp_path):
+def test_successive_corruption_uses_one_quarantine_slot(tmp_path):
     cache_file = tmp_path / "cache.json"
     first = b'{"p/m1": bad'
     cache_file.write_bytes(first)
@@ -320,8 +320,32 @@ def test_load_invalid_record_keeps_earlier_quarantine(tmp_path):
     cache = HealthCache(cache_file=cache_file)
     assert cache.load_state == CacheLoadState.INVALID_RECORD
     assert Path(cache.quarantine_path).read_bytes() == second
-    # The earlier sample was not destroyed.
-    assert cache_file.with_name(cache_file.name + ".corrupt").read_bytes() == first
+    # One bounded slot: the newest incident replaces the previous quarantine
+    # copy instead of spawning .corrupt.2, .corrupt.3, ... (T-102).
+    slot = cache_file.with_name(cache_file.name + ".corrupt")
+    assert slot.read_bytes() == second
+    assert sorted(p.name for p in tmp_path.iterdir()) == [slot.name]
+
+
+def test_unmovable_corrupt_cache_is_resurfaced_without_accumulating(tmp_path, monkeypatch):
+    """A corrupt source that cannot be unlinked stays at the authoritative
+    path, is re-reported on every load, and reuses one quarantine slot
+    instead of growing .corrupt.N copies each reload (T-102)."""
+    cache_file = tmp_path / "cache.json"
+    payload = b'{"p/m1": {"latency_ms": 1, "tags": ['
+    cache_file.write_bytes(payload)
+    slot = cache_file.with_name(cache_file.name + ".corrupt")
+    slot.write_bytes(b"previous incident")
+    monkeypatch.setattr(Path, "unlink", lambda self: (_ for _ in ()).throw(OSError("held open")))
+
+    for _ in range(3):
+        cache = HealthCache(cache_file=cache_file)
+        assert cache.load_state == CacheLoadState.MALFORMED_JSON
+        assert "could not be moved aside" in cache.load_error
+        assert cache.quarantine_path == str(slot)
+        assert slot.read_bytes() == payload
+        assert cache_file.exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == [cache_file.name, slot.name]
 
 
 # ===================================================================
@@ -350,7 +374,7 @@ def test_scanner_terminal_persistence_failure_is_never_completed(tmp_path, monke
     reason = failures[0][1]
     assert "NOT persisted" in reason
     assert "disk offline" in reason
-    assert SECRET not in reason and "[REDACTED]" in reason
+    assert SECRET not in reason and "<REDACTED>" in reason
 
     # The probes themselves succeeded (in-memory evidence exists).
     assert all(cache.get(m.canonical_id) is not None for m in models)

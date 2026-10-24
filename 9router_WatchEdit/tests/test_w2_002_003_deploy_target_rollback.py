@@ -326,3 +326,108 @@ class TestW2003RollbackInvariants:
                              quiet=True, repo_root=repo)
         assert ok is False
         assert dl.last_status() == "RECOVERY_REQUIRED"
+
+
+# =============================================================================
+# T-95: a stop-step FAILURE is not the answer "nothing was running"
+# =============================================================================
+class _FakeCompleted:
+    """Minimal subprocess.CompletedProcess stand-in for offline stop tests."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestStopHelperFailureIsDistinct:
+    """T-95: query/taskkill failure must raise, never read as not-running."""
+
+    def test_query_failure_raises(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+
+        monkeypatch.setattr(subprocess, "run",
+                            lambda args, **kw: _FakeCompleted(returncode=1, stderr="CIM unavailable"))
+        with pytest.raises(dl.StopHelperError):
+            dl._stop_running_instance(repo)
+
+    def test_query_timeout_raises(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+
+        def _timeout(args, **kw):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=30)
+
+        monkeypatch.setattr(subprocess, "run", _timeout)
+        with pytest.raises(dl.StopHelperError):
+            dl._stop_running_instance(repo)
+
+    def test_taskkill_failure_raises_and_names_pid(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+
+        def dispatch(args, **kw):
+            if args[0] == "powershell":
+                return _FakeCompleted(stdout="4242\n")
+            return _FakeCompleted(returncode=128, stderr="access denied")
+
+        monkeypatch.setattr(subprocess, "run", dispatch)
+        with pytest.raises(dl.StopHelperError, match="4242"):
+            dl._stop_running_instance(repo)
+
+    def test_all_pids_killed_returns_true(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+
+        def dispatch(args, **kw):
+            if args[0] == "powershell":
+                return _FakeCompleted(stdout="4242\n99\n")
+            return _FakeCompleted(returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", dispatch)
+        assert dl._stop_running_instance(repo) is True
+
+    def test_no_instances_still_returns_false(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+
+        monkeypatch.setattr(subprocess, "run",
+                            lambda args, **kw: _FakeCompleted(returncode=0, stdout=""))
+        # A genuine "nothing was running" answer keeps its old meaning.
+        assert dl._stop_running_instance(repo) is False
+
+    def test_deploy_aborts_without_activating_when_stop_unconfirmed(self, tmp_path, monkeypatch):
+        import subprocess
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+        _add_branch_commit(repo, "feature", "7")
+        base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        monkeypatch.setattr(dl.vas, "verify_agent_safe", lambda root: [])
+        launches = []
+        monkeypatch.setattr(dl, "_start_instance",
+                            lambda root: launches.append(str(root)) or True)
+
+        real_run = subprocess.run
+
+        def dispatch(args, **kw):
+            if args and args[0] == "powershell":
+                return _FakeCompleted(returncode=1, stderr="query unavailable")
+            return real_run(args, **kw)
+
+        monkeypatch.setattr(subprocess, "run", dispatch)
+
+        ok = dl.deploy_local(source="feature", restart=True, skip_tests=True,
+                             quiet=True, repo_root=repo)
+
+        assert ok is False
+        head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        assert head == base, "an unconfirmed stop must abort before any activation"
+        assert launches == [], "deploy must not launch a new instance on unknown stop state"
+        assert dl.last_status() in ("FAILED_ROLLED_BACK", "RECOVERY_REQUIRED")

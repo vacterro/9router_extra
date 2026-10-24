@@ -20,6 +20,7 @@ from core.classification import (
 )
 from core.discovery import DiscoveredModel
 from core.history import HealthCache
+from core.model_explorer import build_row
 from ui.combo_editor_view import ComboEditorView
 from ui.theme import apply_theme
 
@@ -77,8 +78,15 @@ def test_update_visits_only_the_two_keyed_items(qapp, tmp_path):
 
     assert calls["n"] <= 2, f"badge update performed {calls['n']} item lookups; must be keyed O(1)"
 
-    # Full-scan oracle comparison: keyed update matches a rebuild's text.
+    # Full-scan oracle comparison: the keyed update must produce exactly the
+    # row a rebuild would, so a stale badge can never be left behind.
     item = view._available_item_by_cid.get("p/m7")
     assert item is not None
-    assert "FREE/USE" in item.text()
+    seeded = view.cache.get("p/m7")
+    oracle = view._row_text(
+        build_row(view._model_for_cid("p/m7"), seeded, 7),
+        None,
+    )
+    assert item.text() == oracle
+    assert "[USABLE]" in item.text() and "[FREE]" in item.text()
     view.close()

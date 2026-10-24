@@ -540,6 +540,16 @@ def test_allowed_models_gate_refuses_unlisted_models(tmp_path):
     assert result.error_class == "model_not_bridge_eligible"
 
 
+def test_empty_allowlist_denies_all_models(tmp_path):
+    bridge = _bridge(tmp_path, "ok", models=(FREE_MODEL,))
+    service = OcfBridgeService(bridge=bridge, eligible_models=[])
+
+    assert bridge.allowed_models == set()
+    status, body = service.chat_completion(_payload())
+    assert status == 400
+    assert body["error"]["code"] == UNSUPPORTED_BY_OPENCODE_FREE_BRIDGE
+
+
 def _service(bridge: OpenCodeBridge) -> OcfBridgeService:
     service = OcfBridgeService(bridge=bridge, eligible_models=[FREE_MODEL])
     service.set_eligible_models([FREE_MODEL])
@@ -787,3 +797,52 @@ def test_direct_free_migration_plan_only_maps_verified_models(tmp_path):
         "oc/never-proven-free", "oc/not-free-at-all", "ocf/a-free",
     ]
     assert report.migrated_direct == [("oc/a-free", "ocf/a-free")]
+
+def test_malformed_entries_are_named_in_load_error(tmp_path):
+    """T-97: a malformed persisted entry must be rejected via load_error,
+    never silently dropped while the registry reports a clean load."""
+    from core.ocf_registry import SCHEMA_VERSION
+
+    path = tmp_path / "ocf_registry.json"
+    path.write_text(json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "entries": {
+            "ocf/a-free": {
+                "model_id": "a-free",
+                "canonical_id": "ocf/a-free",
+                "source_canonical_id": "opencode/a-free",
+            },
+            "ocf/bad-not-object": "not-an-object",
+            "ocf/bad-no-model-id": {"canonical_id": "ocf/x"},
+        },
+        "last_reconcile": {},
+        "last_sync": {},
+    }), encoding="utf-8")
+
+    registry = OcfRegistry(path=path)
+
+    assert registry.load_error == "invalid_entries:ocf/bad-no-model-id,ocf/bad-not-object"
+    # The valid entry still loads; the malformed ones are rejected.
+    assert sorted(registry.entries) == ["ocf/a-free"]
+
+
+def test_clean_registry_load_error_stays_empty(tmp_path):
+    from core.ocf_registry import SCHEMA_VERSION
+
+    path = tmp_path / "ocf_registry.json"
+    path.write_text(json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "entries": {
+            "ocf/a-free": {
+                "model_id": "a-free",
+                "canonical_id": "ocf/a-free",
+                "source_canonical_id": "opencode/a-free",
+            },
+        },
+        "last_reconcile": {},
+        "last_sync": {},
+    }), encoding="utf-8")
+
+    registry = OcfRegistry(path=path)
+    assert registry.load_error == ""
+    assert sorted(registry.entries) == ["ocf/a-free"]

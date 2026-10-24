@@ -478,6 +478,123 @@ class TestGitHistory:
         assert rc == 0
         assert "CLEAN HISTORY" in capsys.readouterr().out
 
+    def test_gitsec_004_renamed_private_blob_still_private(self, tmp_path, capsys):
+        """T-94: `git mv credentials.json notes.txt` must NOT defeat the
+        private-filename check.
+
+        History commits arrive newest-first and blobs are scanned once per sha,
+        so a blob renamed away from its private name used to be scanned only
+        under the benign new name and reported as clean history."""
+        from check_git_history import check_history
+        repo = make_mini_repo(tmp_path, "gitsec4")
+        (repo / "credentials.json").write_text(
+            json.dumps({"apiKey": "placeholder"}), encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add credentials")
+        # rename away from the private name; the tree at HEAD is clean
+        (repo / "credentials.json").rename(repo / "notes.txt")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "rename")
+        assert verify_agent_safe(repo) == []
+
+        rc = check_history(repo_root=repo)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "SECRET MATERIAL EXISTS IN HISTORY" in out
+        assert "private_filename" in out
+        assert "credentials.json" in out, "the private historical name must be reported"
+
+    def test_gitsec_005_deleted_private_blob_still_private(self, tmp_path, capsys):
+        """T-94: deletion is the same evasion: the removed blob must still fail
+        history, attributed to the commit that held it."""
+        from check_git_history import check_history
+        repo = make_mini_repo(tmp_path, "gitsec5")
+        (repo / "credentials.json").write_text(
+            json.dumps({"apiKey": "placeholder"}), encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add credentials")
+        git(repo, "rm", "-q", "credentials.json")
+        git(repo, "commit", "-m", "remove")
+
+        rc = check_history(repo_root=repo)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "private_filename" in out and "credentials.json" in out
+
+    def test_gitsec_006_benign_rename_stays_clean(self, tmp_path, capsys):
+        """Control: a rename between equally benign names is not a finding."""
+        from check_git_history import check_history
+        repo = make_mini_repo(tmp_path, "gitsec6")
+        (repo / "notes.txt").write_text("benign\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add")
+        (repo / "notes.txt").rename(repo / "readme.txt")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "rename")
+
+        rc = check_history(repo_root=repo)
+        assert rc == 0
+        assert "CLEAN HISTORY" in capsys.readouterr().out
+
+    def test_gitsec_007_undecodable_blob_is_reported(self, tmp_path, capsys):
+        """T-91: a blob that is not valid UTF-8 and carries no NUL used to be
+        read with ``text=True``, which either crashed the audit
+        (UnicodeDecodeError from the subprocess reader thread) or, under a lossy
+        locale, decoded into garbage. It must now be *reported* as unprovable,
+        never silently scanned as empty text."""
+        from check_git_history import check_history
+        repo = make_mini_repo(tmp_path, "gitsec7")
+        (repo / "blob.bin").write_bytes(b"\xff\xfe\x80\x81 plain prose without NULs")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add undecodable blob")
+
+        rc = check_history(repo_root=repo)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "undecodable_blob" in out
+        assert "cannot prove safe" in out
+        assert "CLEAN HISTORY" not in out, "unprovable is never a clean verdict"
+
+    def test_gitsec_008_binary_blob_still_verdicts_without_crash(self, tmp_path, capsys):
+        """T-91 control: the NUL-bearing binary blob took the binary-skip path
+        before and must keep producing one definitive verdict, not a traceback."""
+        from check_git_history import check_history
+        repo = make_mini_repo(tmp_path, "gitsec8")
+        (repo / "data.bin").write_bytes(b"\xff\xfe\x80\x81 text\x00\x00 more")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add binary blob")
+
+        rc = check_history(repo_root=repo)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "CLEAN HISTORY" in out
+        assert "Traceback" not in out
+
+    def test_gitsec_009_failed_blob_read_is_reported(self, tmp_path, capsys, monkeypatch):
+        """T-91: a ``git cat-file`` that fails for a recorded blob is reported
+        as unprovable, not scanned as if it were empty text."""
+        import check_git_history as cgh
+        repo = make_mini_repo(tmp_path, "gitsec9")
+
+        real = cgh._git_bytes
+        calls = {"n": 0}
+
+        def flaky(args, repo_root=None):
+            done = calls["n"]
+            calls["n"] += 1
+            # every blob read fails exactly once, on the second commit's pass
+            if done >= 2:
+                return subprocess.CompletedProcess(args, 128, b"", b"fatal: Not a valid object")
+            return real(args, repo_root=repo_root)
+
+        monkeypatch.setattr(cgh, "_git_bytes", flaky)
+        rc = cgh.check_history(repo_root=repo)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "unreadable_blob" in out
+        assert "cannot prove safe" in out
+        assert "CLEAN HISTORY" not in out
+
 
 # =============================================================================
 # WT-001..006 - worktree isolation

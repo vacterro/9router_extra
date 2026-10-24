@@ -97,7 +97,8 @@ Run: `pytest 9router_WatchEdit/tests/security -q` (offline, synthetic canaries o
 ## Torture gate (final lock-in)
 
 Cross-layer verification under simultaneous failure conditions, all executable in
-`tests/security/test_torture_gates*.py` (49 tests): zero-trust checkout cycle
+`tests/security/test_torture_gates*.py` (50 tests as of 2026-09-25, collected
+from `test_torture_gates.py` plus `test_torture_gates2.py`): zero-trust checkout cycle
 (G1), simultaneous hostile pollution with complete violation sets and scanner
 recovery (G2), hostile-then-legitimate agent contributions (G3), stale-base +
 real-conflict merges (G4), private-runtime hash immutability across the full

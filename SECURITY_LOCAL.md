@@ -133,8 +133,10 @@ private/legacy backups) get best-effort user-only ACLs (`icacls …
 ## 10. Adversarial test campaign & fail-closed policy
 
 The security waves are verified by an executable adversarial campaign in
-`9router_WatchEdit/tests/security/` (141 tests, all offline, synthetic canaries
-only — never real credentials). Claim → test mapping: **SECURITY_CLAIMS.md**.
+`9router_WatchEdit/tests/security/` (297 tests as of 2026-09-25, all offline,
+synthetic canaries only — never real credentials). Recount with
+`python -m pytest 9router_WatchEdit/tests/security --collect-only -q`.
+Claim → test mapping: **SECURITY_CLAIMS.md**.
 
 Test layers (run defaults: UNIT + INTEGRATION_SAFE only):
 

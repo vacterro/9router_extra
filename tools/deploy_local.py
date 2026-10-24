@@ -159,7 +159,13 @@ def _rollback_runtime_and_source(
     ok = True
 
     if target_launched:
-        stopped = _stop_running_instance(repo_root)
+        try:
+            stopped = _stop_running_instance(repo_root)
+        except StopHelperError as ex:
+            # T-95: rollback cannot claim it restored runtime state when the
+            # stop outcome is unknown; RECOVERY_REQUIRED is the honest answer.
+            steps.append(f"12a. rollback runtime: target stop unconfirmed ({ex})")
+            stopped = False
         steps.append(f"12a. rollback runtime: failed target instance "
                      f"{'stopped' if stopped else 'stop unconfirmed'}")
         ok = ok and stopped
@@ -216,14 +222,30 @@ def _recover_abandoned_deploy(repo_root: Path, log) -> str:
         marker.unlink(missing_ok=True)
         return RECOVERY_NONE
     original_ref = info.get("original_ref", "")
+    original_sha = info.get("original_sha", "")
     log(f"ABANDONED DEPLOY DETECTED (state={state}, started={info.get('started', '?')})")
-    if original_ref:
-        res = _git(["checkout", "-f", original_ref], repo_root)
-        _git(["checkout", original_ref], repo_root)
-        if res.returncode == 0:
-            log(f"Recovered: checked out {original_ref}. Re-run deploy to retry.")
-            marker.unlink(missing_ok=True)
-            return RECOVERY_RECOVERED
+    # T-85: recover to the recorded COMMIT, not to the branch tip. A branch name
+    # keeps moving after the interrupted deploy, so `checkout <branch>` restored
+    # whatever the branch had become instead of the revision the deploy started
+    # from, and its exit code alone could not tell the difference.
+    recovered = ""
+    for candidate in (c for c in (original_sha, original_ref) if c):
+        res = _git(["checkout", "-f", candidate], repo_root)
+        if res.returncode != 0:
+            continue
+        head = _git(["rev-parse", "HEAD"], repo_root).stdout.strip()
+        if original_sha and head != original_sha:
+            continue  # landed somewhere else; this is not the recorded revision
+        recovered = candidate
+        break
+    if recovered:
+        # Re-attach to the recorded branch only when it still points at the
+        # recorded commit; otherwise stay detached at the recovered commit.
+        if original_ref and _git(["rev-parse", original_ref], repo_root).stdout.strip() == head:
+            _git(["checkout", original_ref], repo_root)
+        log(f"Recovered: checked out {recovered} @ {head[:10]}. Re-run deploy to retry.")
+        marker.unlink(missing_ok=True)
+        return RECOVERY_RECOVERED
     log("RECOVERY_REQUIRED: could not restore recorded original revision automatically.")
     return RECOVERY_REQUIRED
 
@@ -357,7 +379,13 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
 
         # 6. Stop running instance only when required
         if restart:
-            stopped = _stop_running_instance(repo_root)
+            try:
+                stopped = _stop_running_instance(repo_root)
+            except StopHelperError as ex:
+                # T-95: an unknown stop outcome is not "none found": abort with
+                # its own message before any mutation happens.
+                steps.append(f"6. running instance: STOP FAILED ({ex})")
+                raise RuntimeError(f"running-instance stop unconfirmed: {ex}")
             original_was_running = stopped
             steps.append(f"6. running instance: {'stopped' if stopped else 'none found'}")
         else:
@@ -450,12 +478,23 @@ def deploy_local(source: Optional[str] = None, restart: bool = False, skip_tests
     return deployed
 
 
+class StopHelperError(RuntimeError):
+    """Stop step outcome could not be determined (T-95).
+
+    Raised when the process listing or a taskkill fails, which is NOT the same
+    as "no instance was running". Callers must abort, not assume."""
+
+
 def _stop_running_instance(repo_root: Path = REPO_ROOT) -> bool:
     """Stops WatchEdit instances launched from THE REQUESTED repository only.
 
     W2-004: process identity is the resolved repo_root path, not the generic
     'run.py + 9router_WatchEdit' text match, so instances started from other
-    worktrees/checkouts are never eligible for taskkill."""
+    worktrees/checkouts are never eligible for taskkill.
+
+    T-95: returns True only when every discovered PID was actually killed.
+    Raises StopHelperError when the listing or a taskkill FAILS, so callers
+    abort distinctly instead of reading an error as "nothing was running"."""
     repo_root = Path(repo_root).resolve()
     target = str(repo_root).replace("'", "''")
     # Match the resolved repo path as substring of the command line after
@@ -472,15 +511,26 @@ def _stop_running_instance(repo_root: Path = REPO_ROOT) -> bool:
         listing = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, timeout=30)
+        if listing.returncode != 0:
+            raise StopHelperError(
+                f"process listing failed (exit {listing.returncode}; "
+                f"{(listing.stderr or '').strip()[:120]})")
         pids = [p.strip() for p in listing.stdout.split() if p.strip().isdigit()]
         stopped = []
         for pid in pids:
             res = subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, text=True)
             if res.returncode == 0:
                 stopped.append(pid)
+            else:
+                raise StopHelperError(
+                    f"taskkill failed for PID {pid} (exit {res.returncode}; "
+                    f"{(res.stderr or res.stdout or '').strip()[:120]})")
         return bool(stopped)
-    except Exception:
-        return False
+    except StopHelperError:
+        raise
+    except Exception as ex:
+        # T-95: a crashed/errored stop is not a "not running" answer.
+        raise StopHelperError(f"{type(ex).__name__}: {ex}") from ex
 
 
 def _start_instance(repo_root: Path = REPO_ROOT) -> bool:

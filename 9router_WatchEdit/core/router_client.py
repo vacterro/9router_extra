@@ -100,11 +100,14 @@ def _find_router_runtime_processes(base_url: str) -> Optional[List[Dict[str, Any
     try:
         res = subprocess.run(
             [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=10.0, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10.0, check=False,
         )
     except Exception:
         return None
-    if res.returncode != 0 or not res.stdout.strip():
+    # A decoding failure leaves stdout as None: that is an INDETERMINATE
+    # check, never "no owner runs".
+    if res.returncode != 0 or not (res.stdout or "").strip():
         return None
     try:
         data = json.loads(res.stdout.strip())
@@ -142,6 +145,18 @@ def _port_from_base_url(base_url: str) -> int:
         return parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError:
         return 0
+
+
+def runtime_owner_processes(base_url: str) -> Optional[List[Dict[str, Any]]]:
+    """Public, read-only view of the 9Router runtime owner processes.
+
+    Attribution surface: which process serves the upstream port. The result
+    is the same evidence ``_find_router_runtime_processes`` collects -- a
+    non-empty list means at least one 9router runtime owner is live, an empty
+    list means POSITIVELY no owner runs, and None means the check could not
+    be performed (indeterminate, never "offline").
+    """
+    return _find_router_runtime_processes(base_url)
 
 
 def validate_router_base_url(value: str) -> str:
@@ -413,6 +428,36 @@ class RouterClient:
                 return res.status_code in (200, 401)
         except Exception:
             return False
+
+    def get_server_version(self, timeout: float = 3.0) -> Optional[str]:
+        """Read the upstream 9router version string (attribution only).
+
+        The version endpoint carries no credential material and is the same
+        endpoint the reachability probe uses, so it needs no authorization
+        header. A malformed or non-JSON answer yields None: a version is a
+        diagnostic datum, never a reason to fail an operation.
+        """
+        self._require_live("get_server_version")
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+                res = client.get(f"{self.base_url}/api/version")
+                if res.status_code != 200:
+                    return None
+                data = res.json()
+        except Exception:
+            return None
+        if isinstance(data, dict):
+            # The live engine answers {"currentVersion": ..., "latestVersion": ...,
+            # "hasUpdate": ...}; older builds used "version". The CURRENT
+            # version is the one that identifies the answering engine.
+            for key in ("currentVersion", "version", "engineVersion", "appVersion"):
+                value = data.get(key)
+                if value:
+                    return str(value)
+            return None
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        return None
 
     def _local_api_get(
         self,
@@ -935,9 +980,16 @@ class RouterClient:
             )
 
     def _get_combos_sqlite(self) -> List[Dict[str, Any]]:
+        """Read-only combo capture from the SQLite fallback.
+
+        A missing DB file is a legitimate empty result. Any READ failure is
+        raised (never hidden as an empty table, T-100) and the connection is
+        closed on every path.
+        """
         if not self.db_path.exists():
             return []
         combos = []
+        conn = None
         try:
             conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
@@ -956,10 +1008,13 @@ class RouterClient:
                     "createdAt": row[4],
                     "updatedAt": row[5],
                 })
-            conn.close()
-        except Exception:
-            pass
-        return combos
+            return combos
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _update_combo_sqlite(self, combo_id: str, name: str, models: List[str], kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # PURE MUTATION: the offline-ownership gate and the validated recovery

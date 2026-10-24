@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOLS = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS))
 
+from core import security as security_mod
 from core.redaction import redact_exception, redact_mapping, redact_text  # noqa: E402
 from core.router_client import RouterClient  # noqa: E402
 from core.security import LOCKED, OS_VAULT, UNLOCKED, LiveAccessLockedError, SecurityManager  # noqa: E402
@@ -67,6 +68,19 @@ class TestRedaction:
         assert MARKER not in json.dumps(red)
         assert all(v == "<REDACTED>" for v in red[0]["nested"][0].values())
 
+    def test_sensitive_key_redacts_container_values(self):
+        # T-90: a list or nested dict under a sensitive key is credential
+        # material too. Recursing into it only ran redact_text, which leaves
+        # strings that carry no credential shape.
+        obj = {
+            "accessToken": [MARKER, "plain-looking-value"],
+            "clientSecret": {"nested": {"deep": MARKER}},
+        }
+        red = redact_mapping(obj)
+        assert MARKER not in json.dumps(red)
+        assert red["accessToken"] == "<REDACTED>"
+        assert red["clientSecret"] == "<REDACTED>"
+
     def test_bearer_and_jwt_and_provider_keys_redacted_in_text(self):
         text = (
             f"Authorization: Bearer {MARKER}\n"
@@ -86,6 +100,33 @@ class TestRedaction:
         ex = FakeError(f"probe failed with bearer {MARKER}")
         assert MARKER not in redact_exception(ex)
 
+    def test_url_credentials_redacted_and_host_stays_parseable(self):
+        """T-92: the '@' separator must survive redaction.
+
+        The pattern consumed the '@' in a group the replacement never re-emitted,
+        so the host collapsed into the userinfo and the URL stopped parsing."""
+        from urllib.parse import urlparse
+        url = f"https://user:{MARKER}@api.example.com/v1/models"
+        red = redact_text(url)
+        assert MARKER not in red
+        assert "<REDACTED>" in red
+        assert urlparse(red).hostname == "api.example.com", red
+        assert urlparse(red).username == "user"
+
+    def test_url_with_empty_user_is_still_redacted(self):
+        """T-92: `redis://:pass@host` needs no user name; it used to leak the
+        password entirely because the userinfo part was mandatory."""
+        from urllib.parse import urlparse
+        url = f"redis://:{MARKER}@127.0.0.1:6379/0"
+        red = redact_text(url)
+        assert MARKER not in red
+        assert urlparse(red).hostname == "127.0.0.1"
+        assert urlparse(red).port == 6379
+
+    def test_plain_url_with_port_is_untouched(self):
+        url = "https://example.com:8080/path"
+        assert redact_text(url) == url
+
 
 # =============================================================================
 # Section 5/6/23: SecretStore backends
@@ -97,6 +138,31 @@ class TestSecretStores:
         blob = dpapi_protect(b"test-secret-bytes")
         assert b"test-secret-bytes" not in blob  # actually encrypted
         assert dpapi_unprotect(blob) == b"test-secret-bytes"
+
+    def test_acl_failure_is_surfaced_not_swallowed(self, tmp_path, monkeypatch):
+        """T-88: an ACL hardening failure must be reported, never swallowed.
+
+        A bare `except Exception: pass` made a file that was never
+        hardened indistinguishable from one that was."""
+        from core import secret_store
+
+        def boom(*args, **kwargs):
+            raise OSError("icacls missing")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        result = secret_store.restrict_to_current_user(tmp_path / "creds.vault")
+        assert result is not None
+        assert "OSError" in result
+
+    def test_acl_success_returns_none(self, tmp_path, monkeypatch):
+        """T-88: the success path stays silent (None), so callers can branch."""
+        from core import secret_store
+
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a, 0, b"", b""),
+        )
+        assert secret_store.restrict_to_current_user(tmp_path / "creds.vault") is None
 
     @pytest.mark.skipif(not VAULT_LIBS, reason="vault libraries not installed")
     def test_vault_roundtrip_and_wrong_password(self, tmp_path):
@@ -125,6 +191,32 @@ class TestSecretStores:
 # Section 7/17/18 + 25(B, G, H): SecurityManager lock/unlock gating
 # =============================================================================
 class TestSecurityManager:
+    def test_corrupt_local_settings_are_not_replaced_by_a_partial_write(self, tmp_path, monkeypatch):
+        # T-86: the corrupt file is evidence. Merging onto {} and writing would
+        # destroy it and make the truncated document look authoritative.
+        settings = tmp_path / "settings.json"
+        settings.write_text('{"trusted_os_unlock": true, "half', encoding="utf-8")
+        monkeypatch.setattr(security_mod, "LOCAL_SETTINGS_FILE", settings)
+        mgr = SecurityManager()
+        reason = mgr._write_local_settings({"trusted_os_unlock": True})
+        assert reason and "unreadable" in reason
+        assert settings.read_bytes() == b'{"trusted_os_unlock": true, "half'
+        # Fail closed: an unreadable file reads as no preference, never as trust
+        assert mgr.trusted_os_unlock_enabled is False
+        assert mgr.settings_error == reason
+
+    def test_settings_write_failure_is_surfaced_not_swallowed(self, tmp_path, monkeypatch):
+        # T-86: an OSError mid-write used to vanish, leaving a preference that
+        # appeared saved while nothing was on disk.
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("x", encoding="utf-8")
+        settings = blocker / "settings.json"
+        monkeypatch.setattr(security_mod, "LOCAL_SETTINGS_FILE", settings)
+        mgr = SecurityManager()
+        reason = mgr.set_trusted_os_unlock(True) or mgr._write_local_settings({"a": 1})
+        assert reason and "Error" in reason
+        assert mgr.settings_error == reason
+
     def test_fresh_checkout_defaults_to_locked(self, tmp_path, monkeypatch):
         monkeypatch.delenv("WATCHEDIT_LIVE_ACCESS", raising=False)
         mgr = SecurityManager(data_dir=tmp_path)
@@ -394,6 +486,56 @@ class TestPrivateBackupAndMigration:
         secrets = vault.load("master-pass-123")
         assert any("settings.json" in k for k in secrets)
 
+    @pytest.mark.skipif(not VAULT_LIBS, reason="vault libraries not installed")
+    def test_private_backup_is_atomic(self, tmp_path, monkeypatch):
+        """T-87: no partial artifact ever holds the final backup name.
+
+        Writing straight to the final name left a truncated .wvault behind on
+        a mid-write failure, where a restore would read it as valid."""
+        import create_private_backup as cpb
+        data_dir = tmp_path / "localdata"
+        (data_dir / "config").mkdir(parents=True)
+        (data_dir / "secure").mkdir(parents=True)
+        (data_dir / "config" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+        monkeypatch.setattr(cpb, "HEALTH_CACHE_FILE", data_dir / "health_cache.json")
+        monkeypatch.setattr(cpb, "PRESETS_FILE", data_dir / "presets.json")
+        monkeypatch.setattr(cpb, "SETTINGS_FILE", data_dir / "settings.json")
+        monkeypatch.setattr(cpb, "SECURE_DIR", data_dir / "secure")
+        monkeypatch.setattr(cpb, "LOCALAPPDATA_DIR", data_dir)
+        monkeypatch.setattr(cpb, "PRIVATE_BACKUP_DIR", tmp_path / "private_backups")
+
+        out_dir = tmp_path / "private_backups"
+        out = cpb.create_private_backup("master-pass-123", out_dir=out_dir)
+        leftovers = sorted(p.name for p in out_dir.iterdir() if p.name.endswith(".partial"))
+        assert leftovers == [], f"partial artifact left behind: {leftovers}"
+        assert sorted(p.name for p in out_dir.iterdir()) == [out.name]
+
+    @pytest.mark.skipif(not VAULT_LIBS, reason="vault libraries not installed")
+    def test_private_backup_failure_leaves_no_final_artifact(self, tmp_path, monkeypatch):
+        """T-87: a mid-write failure cleans up and never occupies the final name."""
+        import create_private_backup as cpb
+        data_dir = tmp_path / "localdata"
+        (data_dir / "config").mkdir(parents=True)
+        (data_dir / "secure").mkdir(parents=True)
+        (data_dir / "config" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+        for name in ("HEALTH_CACHE_FILE", "PRESETS_FILE", "SETTINGS_FILE"):
+            monkeypatch.setattr(cpb, name, data_dir / f"{name.lower()}")
+        monkeypatch.setattr(cpb, "SECURE_DIR", data_dir / "secure")
+        monkeypatch.setattr(cpb, "LOCALAPPDATA_DIR", data_dir)
+
+        def exploding_writestr(*args, **kwargs):
+            raise OSError("disk full mid-write")
+
+        import zipfile
+        monkeypatch.setattr(zipfile.ZipFile, "writestr", exploding_writestr)
+        with pytest.raises(OSError):
+            cpb.create_private_backup("master-pass-123", out_dir=tmp_path / "private_backups")
+
+        out_dir = tmp_path / "private_backups"
+        names = sorted(p.name for p in out_dir.iterdir()) if out_dir.exists() else []
+        assert not [n for n in names if n.endswith(".wvault")], f"final artifact written: {names}"
+        assert not [n for n in names if n.endswith(".partial")], f"partial left behind: {names}"
+
     def test_migration_scan_only_detects_and_reports(self, tmp_path):
         """21: migration tool detects legacy private files without deleting in scan-only mode."""
         import migrate_legacy_secrets as mls
@@ -456,3 +598,28 @@ class TestGitProtection:
         from core.secret_scanner import scan_tree
         findings = scan_tree(REPO_ROOT)
         assert findings == [], f"unexpected findings: {[(f.file, f.reason) for f in findings]}"
+
+    def test_missing_include_path_is_a_finding_not_a_clean_scan(self, tmp_path):
+        """T-89: an include entry naming nothing must be reported.
+
+        A missing path used to be skipped by `p.is_file()`, so the export
+        gate scanned nothing and wrote the bundle unproven."""
+        from core.secret_scanner import scan_tree
+
+        missing = tmp_path / "never_written.json"
+        findings = scan_tree(tmp_path, include=[missing])
+        assert len(findings) == 1
+        assert findings[0].reason == "missing_include"
+        assert str(missing) in findings[0].file
+
+    def test_include_directory_is_scanned(self, tmp_path):
+        """T-89: an include entry that is a directory is scanned, not skipped."""
+        from core.secret_scanner import scan_tree
+
+        (tmp_path / "sub").mkdir()
+        secret = tmp_path / "sub" / "config.json"
+        secret.write_text(json.dumps({"apiKey": _fake_sk()}), encoding="utf-8")
+        findings = scan_tree(tmp_path, include=[tmp_path / "sub"])
+        reasons = [f.reason for f in findings]
+        assert reasons, "a credential-bearing file inside the include directory was not scanned"
+        assert "sensitive_key_value" in reasons

@@ -75,13 +75,30 @@ PROVIDER_KEY_RE = re.compile(
 # (real credentials are never shorter; engine unit-test fixtures routinely use
 # short memorable fakes like "test-apikey").
 #
+# T-93: the value may be quoted (spaces allowed, YAML/JSON) or BARE
+# (`apiKey=sk-live-...`, .env style). A bare value counts only when it looks
+# like a credential — one digit or one of `+ = /` — and is not code: in source
+# and patches a bare value after a sensitive key is an expression
+# (`"consecutive_auth": self.consecutive_auth`,
+# `$apiKey = ConvertTo-PlainText $secureKey`) and used to redden the tree.
+# Ceiling: an unquoted ALPHABET-ONLY value (`apiKey=abcdefghijklmnopqrst`) is
+# indistinguishable from an identifier/slug, so the quoted rules and the
+# provider/entropy patterns stay its only detectors.
+#
 # PERFORMANCE (campaign PARSE-002): a single regex with a leading character
 # class quantifier backtracks quadratically on huge single lines. Detection is
 # therefore two-stage: find the credential-word core (literal alternation,
 # linear), then validate a small bounded window before/after it.
 _CORE_ONLY_RE = re.compile(r'(?i)(?:' + _KEY_CORE + r')')
 _KV_KEY_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-_KV_WINDOW_RE = re.compile(r'(?i)["\']?\s*[:=]\s*(?:\n\s+)?["\']([^"\'\n]{16,})["\']')
+_KV_WINDOW_RE = re.compile(
+    r'''(?i)["\']?\s*[:=]\s*(?:\n\s+)?(?:
+          "([^"\n]{16,})"           # double-quoted: spaces allowed
+        | '([^'\n]{16,})'           # single-quoted: spaces allowed
+        | ([^\s"',;#)(\]\[&]{16,})  # bare: stops at any delimiter
+    )''', re.VERBOSE)
+_BARE_CODE_RE = re.compile(r'[.()\[\]{}]')  # attribute path, call, interpolation
+_BARE_MIN_DIGITS = 4
 _MAX_KEY_LEN = 64
 _MAX_VALUE_WINDOW = 512
 
@@ -261,7 +278,19 @@ def _kv_scan(text: str, path: Path, findings: List[Finding]) -> None:
         vm = _KV_WINDOW_RE.match(window)
         if not vm:
             continue
-        value = vm.group(1)
+        # T-93: exactly one alternative matched (double-quoted, single-quoted,
+        # bare). A bare value must be credential-shaped, not code.
+        value = next((g for g in vm.groups() if g), "")
+        if not value:
+            continue
+        if vm.group(3) is not None:
+            # T-93: bare value must be credential-shaped, not code. opaqueness
+            # = a symbol (`+ = /`) or >= 4 digits; code = path/call/interpolation.
+            if _BARE_CODE_RE.search(value):
+                continue
+            if "+" not in value and "=" not in value and "/" not in value and \
+                    sum(c.isdigit() for c in value) < _BARE_MIN_DIGITS:
+                continue
         if _is_placeholder(value) or BENIGN_TOKEN_RE.search(value):
             continue
         findings.append(Finding(
@@ -393,8 +422,20 @@ def scan_tree(root: Path, include: Optional[Iterable[Path]] = None) -> List[Find
     findings: List[Finding] = []
     if include is not None:
         for p in include:
+            # T-89: an include entry that names nothing is a missing path,
+            # not a clean one. Skipping it silently let a diagnostics export
+            # gate scan nothing and report CLEAN, so the bundle that was
+            # supposed to carry that path was written unproven.
+            if not p.exists():
+                findings.append(Finding(str(p), "missing_include",
+                                        "requested include path does not exist", "-"))
+                continue
             if p.is_file():
                 findings.extend(scan_file(p, root))
+            else:
+                for sub in sorted(p.rglob("*")):
+                    if sub.is_file():
+                        findings.extend(scan_file(sub, root))
         return findings
     for p in sorted(root.rglob("*")):
         if p.is_file():

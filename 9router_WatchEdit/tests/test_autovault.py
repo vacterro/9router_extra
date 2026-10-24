@@ -7,6 +7,7 @@ Scheduler interaction (except the idempotent-registration unit tests which
 use a stubbed subprocess runner). Vault libs required.
 """
 import base64
+import datetime
 import hashlib
 import io
 import json
@@ -454,6 +455,41 @@ def test_28_restore_requires_master_password(tmp_path, monkeypatch):
         av.restore_backup(path, WRONG, apply=False)
 
 
+def test_29b_escaping_entry_writes_nothing_else(tmp_path, monkeypatch):
+    """T-84: containment is proven for every entry BEFORE the first write.
+
+    The gate used to run inside the write loop, so the entries before the
+    escaping one were already on disk when the restore aborted: a partially
+    applied recovery reported as a completed one.
+    """
+    env = Env(tmp_path)
+    secret = env.setup_secret(monkeypatch)
+    good = b"G" * 32
+    escape = b"E" * 32
+    entries = {
+        "watchedit/settings.json": base64.b64encode(good).decode("ascii"),
+        "watchedit/../../escaped.txt": base64.b64encode(escape).decode("ascii"),
+    }
+    meta = [
+        {"path": "watchedit/settings.json", "encoding": "base64",
+         "size_bytes": len(good), "sha256": hashlib.sha256(good).hexdigest()},
+        {"path": "watchedit/../../escaped.txt", "encoding": "base64",
+         "size_bytes": len(escape), "sha256": hashlib.sha256(escape).hexdigest()},
+    ]
+    container = env.dest / "escaping.wvault"
+    av._write_container(container, entries, meta, secret,
+                        av.RECOVERY_ENVELOPE_PATH.read_bytes(), "f" * 64,
+                        datetime.datetime.now())
+
+    out = {"9router": env.root / "out9", "watchedit": env.root / "outw"}
+    with pytest.raises(av.AutoVaultError) as ei:
+        av.restore_backup(container, MASTER, apply=True, out_dirs=out)
+    assert ei.value.category == "restore_escape"
+    assert not (env.root / "outw" / "settings.json").exists()
+    assert not (env.root / "outw").exists() or not any((env.root / "outw").rglob("*"))
+    assert not (env.root / "escaped.txt").exists()
+
+
 def test_29_restore_verifies_hashes_before_writes(tmp_path, monkeypatch):
     env = Env(tmp_path)
     secret = env.setup_secret(monkeypatch)
@@ -490,3 +526,26 @@ def test_30_sqlite_quick_check_after_round_trip(tmp_path, monkeypatch):
     # provider state round-trips
     jwt = (env.root / "rt9" / "jwt-secret").read_bytes()
     assert jwt == b"j" * 64
+
+
+def test_31_recovery_envelope_replacement_preserves_old_on_failure(tmp_path, monkeypatch):
+    env = Env(tmp_path)
+    old_secret = env.setup_secret(monkeypatch)
+    old_bytes = av.RECOVERY_ENVELOPE_PATH.read_bytes()
+    original_create = av.VaultStore.create
+
+    def fail_create(self, password, secrets=None):
+        raise OSError("injected vault creation failure")
+
+    monkeypatch.setattr(av.VaultStore, "create", fail_create)
+    with pytest.raises(OSError, match="injected"):
+        av.create_recovery_envelope("new-secret", MASTER)
+
+    assert av.RECOVERY_ENVELOPE_PATH.read_bytes() == old_bytes
+    assert av.unlock_recovery_envelope(av.RECOVERY_ENVELOPE_PATH, MASTER) == old_secret
+    assert not list(env.secure.glob(".scheduled-backup-recovery.vault.*.tmp"))
+
+    monkeypatch.setattr(av.VaultStore, "create", original_create)
+    new_secret = av.generate_backup_secret()
+    av.create_recovery_envelope(new_secret, MASTER)
+    assert av.unlock_recovery_envelope(av.RECOVERY_ENVELOPE_PATH, MASTER) == new_secret

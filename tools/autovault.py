@@ -52,6 +52,7 @@ import secrets as pysecrets
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -264,10 +265,23 @@ def create_recovery_envelope(secret: str, master_password: str) -> None:
     if not SECURE_DIR.is_absolute():
         raise AutoVaultError("storage", "private storage unavailable")
     SECURE_DIR.mkdir(parents=True, exist_ok=True)
-    if RECOVERY_ENVELOPE_PATH.exists():
-        RECOVERY_ENVELOPE_PATH.unlink()
-    vault = VaultStore(RECOVERY_ENVELOPE_PATH)
-    vault.create(master_password, secrets={"backup_secret": secret})
+    fd, candidate_name = tempfile.mkstemp(
+        prefix=f".{RECOVERY_ENVELOPE_PATH.name}.",
+        suffix=".tmp",
+        dir=str(RECOVERY_ENVELOPE_PATH.parent),
+    )
+    os.close(fd)
+    candidate = Path(candidate_name)
+    try:
+        candidate.unlink()
+        VaultStore(candidate).create(master_password, secrets={"backup_secret": secret})
+        unlock_recovery_envelope(candidate, master_password)
+        candidate.replace(RECOVERY_ENVELOPE_PATH)
+    finally:
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def unlock_recovery_envelope(envelope_path: Path, master_password: str) -> str:
@@ -938,17 +952,27 @@ def restore_backup(backup_path: Path, master_password: str, out_dirs: Optional[D
         out_dirs = {"9router": APPDATA_ROUTER, "watchedit": LOCALAPPDATA_DIR}
 
     written: List[str] = []
-    for rel, raw in entries.items():
+    # T-84: containment is proven for EVERY entry before the first byte is
+    # written. Checking it inside the write loop left earlier entries already
+    # restored when a later escaping entry aborted the restore, so an aborted
+    # recovery looked like a successful one that had merely written less.
+    targets: List = []
+    for rel in entries:
         cat, _, sub = rel.partition("/")
-        base = Path(out_dirs[cat])
+        if cat not in out_dirs or not sub or sub in (".", ".."):
+            raise AutoVaultError("restore_escape", f"entry has no destination root: {rel}")
+        base = Path(out_dirs[cat]).resolve()
         target = (base / sub).resolve()
         try:
-            target.relative_to(base.resolve())
+            target.relative_to(base)
         except ValueError:
             raise AutoVaultError("restore_escape", f"entry escapes destination: {rel}")
+        targets.append((rel, target))
+
+    for rel, target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".restore.tmp")
-        tmp.write_bytes(raw)
+        tmp.write_bytes(entries[rel])
         os.replace(tmp, target)
         written.append(rel)
     return {"verified": True, "restored": written, "entries": sorted(entries.keys()),

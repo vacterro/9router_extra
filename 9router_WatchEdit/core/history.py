@@ -221,8 +221,8 @@ def _write_temp_file(temp_file: Path, payload: str) -> None:
 
 
 class HealthCache:
-    # Deterministic recovery name for a corrupt source: <cache>.corrupt
-    # (and <cache>.corrupt.N if an earlier quarantine is already there).
+    # Deterministic recovery name for a corrupt source: a single <cache>.corrupt
+    # slot, overwritten per incident so quarantines never accumulate (T-102).
     QUARANTINE_SUFFIX = ".corrupt"
 
     def __init__(self, cache_file: Path = HEALTH_CACHE_FILE):
@@ -247,16 +247,14 @@ class HealthCache:
 
     # ------------------------------------------------------------- loading
     def _quarantine_target(self) -> Path:
-        """Deterministic recovery name (first free when one already exists)."""
-        base = self.cache_file.with_name(self.cache_file.name + self.QUARANTINE_SUFFIX)
-        if not base.exists():
-            return base
-        n = 2
-        while True:
-            candidate = base.with_name(base.name + f".{n}")
-            if not candidate.exists():
-                return candidate
-            n += 1
+        """Deterministic recovery name: one slot, overwritten per incident.
+
+        A bounded single slot is the whole point: an earlier quarantine
+        stays on disk until the next corrupt incident replaces it, so
+        quarantine copies never accumulate as ``.corrupt.2``, ``.corrupt.3``,
+        ... over successive incidents (T-102).
+        """
+        return self.cache_file.with_name(self.cache_file.name + self.QUARANTINE_SUFFIX)
 
     def _corrupt(
         self,

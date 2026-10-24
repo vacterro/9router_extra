@@ -1,10 +1,23 @@
-"""Keep the package and human-facing release identity in lockstep."""
+"""Keep the package and human-facing release identity in lockstep.
+
+``VERSION`` is the canonical release surface (the ship procedure says so), so
+the expectation is derived from it rather than hardcoded here. A hardcoded
+literal silently breaks on the next version bump -- which is exactly how the
+v0.1.1 release shipped with pyproject.toml still at 0.1.0 while this test kept
+asserting 0.1.0 and going red.
+"""
 from pathlib import Path
 import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_RELEASE = "0.1.0"
+
+
+def _canonical_release() -> str:
+    """The single source of truth every other surface must match."""
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", version), f"VERSION is not a static semver: {version!r}"
+    return version
 
 
 def _project_version() -> str:
@@ -31,4 +44,4 @@ def test_release_version_surfaces_match():
         "README.md": readme_match.group(1),
         "CHANGELOG.md": changelog_match.group(1),
     }
-    assert versions == {name: EXPECTED_RELEASE for name in versions}, versions
+    assert versions == {name: _canonical_release() for name in versions}, versions

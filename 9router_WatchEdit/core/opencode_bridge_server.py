@@ -122,6 +122,7 @@ class OcfBridgeService:
         self._active_lock = threading.Lock()
         self._next_request_id = 0
         self._recent: List[Dict[str, Any]] = []
+        self.set_eligible_models(self._eligible_models)
         self.refresh_models_if_due()
 
     # -- inventory -----------------------------------------------------------
@@ -129,7 +130,7 @@ class OcfBridgeService:
         with self._lock:
             self._eligible_models = [str(m) for m in models if str(m).strip()]
         # The bridge only ever runs models proven eligible by the registry.
-        self.bridge.allowed_models = set(self._eligible_models) or None
+        self.bridge.allowed_models = set(self._eligible_models)
 
     def eligible_models(self) -> List[str]:
         with self._lock:
@@ -394,8 +395,6 @@ def build_service(eligible_models: Optional[List[str]] = None,
         context=context, runtime=resolve_runtime(), health=BridgeHealth(context.health_file),
     )
     service = OcfBridgeService(bridge=resolved, eligible_models=eligible_models)
-    if eligible_models:
-        service.set_eligible_models(eligible_models)
     return service
 
 
@@ -405,6 +404,7 @@ def serve(port: int = OCF_BRIDGE_DEFAULT_PORT,
           dynamic: bool = True) -> OcfBridgeServer:
     service = build_service(eligible_models=eligible_models, bridge=bridge)
     service._dynamic = bool(dynamic) and not eligible_models
+    service.refresh_models_if_due()
     # Loopback only: an ocf bridge must never be reachable off-machine.
     server = OcfBridgeServer((OCF_BRIDGE_HOST, int(port)), service)
     return server

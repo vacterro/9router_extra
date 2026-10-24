@@ -16,6 +16,7 @@ Prints PREMERGE: PASS only if every step succeeds.
 from __future__ import annotations
 
 import argparse
+import os
 import py_compile
 import re
 import subprocess
@@ -27,7 +28,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "9router_WatchEdit"))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-CONFLICT_MARKER_RE = re.compile(r'^(<<<<<<<|=======|>>>>>>>) ', re.MULTILINE)
+# Exactly-seven conflict markers, bare or with a label. Longer '====' runs are
+# ASCII-section underlines (README.txt) and must not fire (T-96).
+CONFLICT_MARKER_RE = re.compile(
+    r'^(?:<{7}(?: .*)?|\|{7}(?: .*)?|={7}|>{7}(?: .*)?)$', re.MULTILINE
+)
 
 
 def step_verify(quiet=True) -> bool:
@@ -76,6 +81,20 @@ def step_compile() -> bool:
     return True
 
 
+def _tracked_text_files() -> List[Path]:
+    """Every git-tracked text file (binary blobs are skipped by NUL byte).
+
+    Scoping by the tracked set (not one directory of ``*.py``) is what makes
+    the gate cover tools/, root config files and docs as well (T-96).
+    """
+    res = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"], capture_output=True
+    )
+    if res.returncode != 0:
+        return []
+    return [REPO_ROOT / os.fsdecode(rel) for rel in res.stdout.split(b"\0") if rel]
+
+
 def step_git_sanity() -> bool:
     status = subprocess.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
                             capture_output=True, text=True)
@@ -85,15 +104,25 @@ def step_git_sanity() -> bool:
     dirty = [l for l in status.stdout.splitlines() if l.strip()]
     if dirty:
         print(f"    working tree has {len(dirty)} uncommitted path(s) (review before merge)")
-    # conflict markers in tracked source
-    for p in (REPO_ROOT / "9router_WatchEdit").rglob("*.py"):
+    # conflict markers anywhere in tracked text
+    for p in _tracked_text_files():
         if "__pycache__" in p.parts:
             continue
         try:
-            if CONFLICT_MARKER_RE.search(p.read_text(encoding="utf-8", errors="replace")):
-                print(f"    conflict markers present: {p}")
-                return False
+            raw = p.read_bytes()
         except OSError:
+            return False
+        if b"\0" in raw:
+            continue  # binary: no conflict markers to detect
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", errors="replace")
+        # Normalize line endings so a lone `$` in the regex still matches a
+        # CRLF-checked-out marker (Windows worktrees).
+        text = text.replace("\r\n", "\n")
+        if CONFLICT_MARKER_RE.search(text):
+            print(f"    conflict markers present: {p}")
             return False
     return True
 

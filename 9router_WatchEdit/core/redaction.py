@@ -44,8 +44,13 @@ _TEXT_PATTERNS = [
     re.compile(r'(?i)kira_[a-zA-Z0-9_\-\.]{8,}'),
     re.compile(r'\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\b'),
     re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY(?: BLOCK)?-----'),
-    # credentials embedded in URLs: https://user:pass@host, redis://:pass@host
-    re.compile(r'(?i)([a-z][a-z0-9+.\-]*://[^/\s:@]+:)([^@\s]{4,})(@)'),
+    # Credentials embedded in URLs: https://user:pass@host, redis://:pass@host.
+    # T-92: the '@' is a LOOKAHEAD, not a consuming group — a consumed group is
+    # dropped by the generic group(1)+REDACTED replacement below, which merged
+    # the host into the userinfo (`https://user:<REDACTED>host`). The userinfo
+    # is optional so an empty user (`redis://:pass@host`) is redacted too: it
+    # used to slip through the required `[^/\s:@]+` and leak the password.
+    re.compile(r'(?i)([a-z][a-z0-9+.\-]*://(?:[^/\s:@]+)?:)([^@\s]{4,})(?=@)'),
 ]
 
 
@@ -79,7 +84,12 @@ def redact_mapping(obj: Any, _depth: int = 0) -> Any:
         out: Dict[str, Any] = {}
         for k, v in obj.items():
             key_str = str(k)
-            if isinstance(v, str) and v and SENSITIVE_KEY_RE.match(key_str):
+            # T-90: the whole VALUE under a sensitive key is credential
+            # material, whatever its type. A list or nested dict used to be
+            # recursed into instead of redacted, and redact_text only removes
+            # credential-SHAPED strings, so a plain string carried inside one
+            # of those containers survived.
+            if SENSITIVE_KEY_RE.match(key_str):
                 out[key_str] = REDACTED
             else:
                 out[key_str] = redact_mapping(v, _depth + 1)

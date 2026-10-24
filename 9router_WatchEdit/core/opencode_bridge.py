@@ -725,7 +725,7 @@ class OpenCodeBridge:
         self.timeout = float(timeout)
         self.agent = agent
         self.max_attempts = MAX_ATTEMPTS
-        self.allowed_models = set(allowed_models) if allowed_models else None
+        self.allowed_models = None if allowed_models is None else set(allowed_models)
         self._version_probed = False
 
     # -- diagnostics ---------------------------------------------------------

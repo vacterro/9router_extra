@@ -42,7 +42,7 @@ from config import (  # noqa: E402
     HEALTH_CACHE_FILE, LOCALAPPDATA_DIR, PRESETS_FILE, PRIVATE_BACKUP_DIR,
     SECURE_DIR, SETTINGS_FILE,
 )
-from core.secret_store import VaultStore  # noqa: E402
+from core.secret_store import VaultStore, restrict_to_current_user  # noqa: E402
 
 
 def _collect_sources() -> List[Path]:
@@ -60,16 +60,44 @@ def _collect_sources() -> List[Path]:
     return sources
 
 
+def _refuse_repo_destination(out_dir: Path, action: str) -> None:
+    """BACKUP-001: private material must never be written inside the repo.
+
+    os.path.normcase covers case-variant spellings on case-insensitive
+    filesystems (T-99): a differently-cased in-repo path must be refused
+    exactly like the exact-match one.
+    """
+    out_dir = Path(out_dir).resolve()
+    child = os.path.normcase(str(out_dir))
+    parent = os.path.normcase(str(REPO_ROOT.resolve()))
+    if child == parent or child.startswith(parent + os.sep):
+        raise ValueError(
+            f"{action} destination must be OUTSIDE the repository "
+            f"(refused: {out_dir} is inside {REPO_ROOT})"
+        )
+
+
+def _resolve_entry_within(out_dir: Path, rel: str) -> Path:
+    """Resolve one payload entry strictly under out_dir or fail closed (T-98).
+
+    The archive manifest is not encrypted and its hashes are attacker
+    computable, so a crafted .wvault can name any rel: relative escapes
+    (``../..``) and absolute rels must never land outside the restore
+    destination.
+    """
+    target = (Path(out_dir) / rel).resolve()
+    child = os.path.normcase(str(target))
+    parent = os.path.normcase(str(out_dir))
+    if child == parent or child.startswith(parent + os.sep):
+        return target
+    raise ValueError(f"Backup entry escapes restore destination: {rel}")
+
+
 def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> Path:
     if not password or len(password) < 8:
         raise ValueError("Master password must be at least 8 characters")
     out_dir = Path(out_dir).resolve()
-    # BACKUP-001: private backups must NEVER be written inside the repository
-    if str(out_dir).startswith(str(REPO_ROOT.resolve()) + os.sep) or out_dir == REPO_ROOT.resolve():
-        raise ValueError(
-            "Private backup destination must be OUTSIDE the repository "
-            f"(refused: {out_dir} is inside {REPO_ROOT})"
-        )
+    _refuse_repo_destination(out_dir, "Private backup")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sources = _collect_sources()
@@ -104,28 +132,40 @@ def create_private_backup(password: str, out_dir: Path = PRIVATE_BACKUP_DIR) -> 
     vault.create(password, secrets=entries)
 
     # 3. Wrap in a clearly-named container.
+    # T-87: the archive is built under a hidden temp name and promoted with
+    # os.replace only after it is complete. Writing straight to the final
+    # name meant a failure mid-write left a truncated .wvault sitting where
+    # a restore would later read it as a valid backup.
     stamp = datetime.datetime.now().strftime("%Y-%m-%d")
     out_path = out_dir / f"PRIVATE_SECRET_BACKUP_{stamp}.wvault"
     n = 1
     while out_path.exists():
         n += 1
         out_path = out_dir / f"PRIVATE_SECRET_BACKUP_{stamp}_{n}.wvault"
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("WARNING.txt",
-                    "PRIVATE SECRET BACKUP - NEVER SHARE, NEVER UPLOAD, NEVER COMMIT.\n"
-                    "Payload is Argon2id+AES-256-GCM encrypted; requires the master password.\n")
-        zf.write(vault_path, "payload.vault")
-        zf.writestr("manifest.json", json.dumps({
-            "created": datetime.datetime.now().isoformat(),
-            "entry_count": len(entries),
-            "entries": manifest_entries,
-            "crypto": "argon2id + aes-256-gcm",
-            "encoding": "base64 (byte-preserving; see entries[].sha256/size_bytes)",
-        }, indent=2))
-    vault_path.unlink()
-
-    from core.secret_store import restrict_to_current_user
-    restrict_to_current_user(out_dir)
+    tmp_out = out_path.with_suffix(out_path.suffix + ".partial")
+    promoted = False
+    try:
+        with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("WARNING.txt",
+                        "PRIVATE SECRET BACKUP - NEVER SHARE, NEVER UPLOAD, NEVER COMMIT.\n"
+                        "Payload is Argon2id+AES-256-GCM encrypted; requires the master password.\n")
+            zf.write(vault_path, "payload.vault")
+            zf.writestr("manifest.json", json.dumps({
+                "created": datetime.datetime.now().isoformat(),
+                "entry_count": len(entries),
+                "entries": manifest_entries,
+                "crypto": "argon2id + aes-256-gcm",
+                "encoding": "base64 (byte-preserving; see entries[].sha256/size_bytes)",
+            }, indent=2))
+        # T-87: ACLs are applied to the temp file BEFORE it is promoted, so the
+        # finished backup never exists even briefly with inherited permissions.
+        restrict_to_current_user(tmp_out)
+        os.replace(tmp_out, out_path)
+        promoted = True
+    finally:
+        vault_path.unlink(missing_ok=True)
+        if not promoted:
+            tmp_out.unlink(missing_ok=True)
     return out_path
 
 
@@ -137,9 +177,7 @@ def extract_private_backup(wvault_path: Path, password: str, out_dir: Path) -> L
     """
     wvault_path = Path(wvault_path)
     out_dir = Path(out_dir).resolve()
-    repo_root = REPO_ROOT.resolve()
-    if str(out_dir).startswith(str(repo_root) + os.sep) or out_dir == repo_root:
-        raise ValueError("Restore destination must be OUTSIDE the repository")
+    _refuse_repo_destination(out_dir, "Restore")
     with zipfile.ZipFile(wvault_path) as zf:
         payload = zf.read("payload.vault")
         manifest = json.loads(zf.read("manifest.json"))
@@ -165,7 +203,7 @@ def extract_private_backup(wvault_path: Path, password: str, out_dir: Path) -> L
             raise ValueError(f"Length mismatch for {rel}: backup is corrupted")
         if hashlib.sha256(raw).hexdigest() != meta.get("sha256"):
             raise ValueError(f"SHA-256 mismatch for {rel}: backup is corrupted")
-        target = (out_dir / rel)
+        target = _resolve_entry_within(out_dir, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(raw)
         try:

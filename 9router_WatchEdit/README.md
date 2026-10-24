@@ -46,6 +46,22 @@ Real-time provider/model health scanner & combo editor control plane for local 9
 - Allows the operator to explicitly choose: **Overwrite 9Router**, **Keep 9Router State**, or **Cancel**.
 - A passive background timer checks for external modifications and surfaces a notification bar if an external edit occurs during an editing session.
 
+### Upstream Attribution & Failover Diagnostics (read-only)
+- The Combo tab shows a **Failover** line under the member list: the predicted
+  chain of the member list the **engine** currently holds, derived from the
+  local health history. An unsaved draft is named as such (`draft N enabled
+  (unsaved)`) and is never presented as published.
+- `Upstream...` opens a read-only diagnostic: which loopback endpoint answers,
+  whether it answered, the version it reports, which process owns the port, and
+  the per-member expectation (expected to answer / expected to fail / may fail,
+  upstream fails over / untested) with the upstream failover rules the
+  prediction is attributed to.
+- A member that is configured but **disabled is not published** to the engine,
+  so it is not part of the chain; the report lists it separately.
+- The surface never writes and never reports a request outcome: the upstream
+  still tries every member in its own order, and the report is a prediction
+  from health evidence, not a request log.
+
 ---
 
 ## 3. Decoupled Classification & Evidence Streaks
@@ -95,26 +111,48 @@ Transients (`RATE_LIMIT -> TEMP_ERROR -> 404`) never accumulate toward `DEAD`.
 
 ---
 
-## 4. Single-Screen Unified Workspace
+## 4. Task-Tab Workspace
+
+The workspace is a single `QTabWidget` with exactly four top-level tabs, and a
+fresh launch always lands on the first one:
 
 ```
-+------------------------------------+------------------------------------+
-|  WATCH VIEW (55% Width)            |  COMBO EDITOR (45% Width)          |
-|  - [ALL] [USE] [FREE] [PAID]       |  - Combo Selector + New/Rename/Dup |
-|    [ATTENTION] [PENDING] [DEAD]    |  - Revert / Reload / Save buttons  |
-|  - Search Filter                   |  - Drag & Drop Ordered Models      |
-|  - Real-time Health Table          |  - Available Verified Models List  |
-+------------------------------------+------------------------------------+
-|  ACTIVITY LOG (60% Width)          |  INSPECTOR PANEL (40% Width)       |
-|  - In-flight probe progress        |  - Latency, streaks, HTTP detail   |
-|  - Live probe stream               |  - Cost Override + Retest Button   |
-+------------------------------------+------------------------------------+
++--------------------------------------------------------------+
+|  Models | Combo | OpenCode | FREE Fallback                     |
++--------------------------------------------------------------+
+|  (Models tab)                                                |
+|    - [ALL] [USE] [FREE] [PAID] [ATTENTION] [PENDING] [DEAD]  |
+|    - Search Filter                                            |
+|    - Real-time Health Table                                   |
+|    - Stop Scan: visible, disabled while idle                  |
++--------------------------------------------------------------+
+|  (Combo tab)      - Combo Selector + New/Rename/Dup           |
+|                    Revert / Reload / Save buttons             |
+|                    Drag & Drop Ordered Models                 |
+|                    Available Verified Models List             |
+|  (OpenCode tab)   - catalog panel, explicit actions only      |
+|  (FREE Fallback)  - see section 5                             |
++--------------------------------------------------------------+
 ```
 
-- **Instant Startup**: Populates immediately (<100ms) from cached inventory, then triggers non-blocking background discovery.
-- **Direct Drag & Drop**: Drag rows directly from WatchView into ComboEditor.
-- **Scan Freeze**: Sorting is frozen during active scanning to prevent row jumping.
-- **Presets Manager**: Accessible via the top toolbar button for on-demand comparison and application.
+- **Explicit actions only**: no background mutation, no silent combo rewrite, and
+  no polling that changes UI state under the user. An idle window issues zero
+  requests and leaves no `QTimer` active.
+- **No startup discovery**: the window does not kick off a background scan on
+  launch. Scanning starts when the user asks for it.
+- **Model Details open explicitly**: selecting a row neither resizes the
+  workspace nor opens a dialog. Details open only through the explicit
+  `details_requested` action, as a dialog that can be dismissed independently.
+- **Scan Freeze**: sorting is frozen during an active scan to prevent row
+  jumping, and the workspace geometry is stable throughout.
+- **Presets Manager**: accessible via the top toolbar button for on-demand
+  comparison and application.
+
+The legacy all-in-one splitter, the persistent Activity Log, the persistent
+Inspector panel and the duplicated bottom insertion were all removed; the
+attributes `vertical_splitter`, `bottom_widget`, `bottom_tabs`, `activity` and
+`inspector` no longer exist on the window. This section is pinned by
+`tests/test_t33_ui_simplification.py`.
 
 ---
 

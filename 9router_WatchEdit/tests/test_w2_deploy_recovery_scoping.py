@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -40,12 +41,15 @@ def _mini_repo(tmp_path: Path, name: str = "repo") -> Path:
     return repo
 
 
-def _plant_marker(repo: Path, state: str, original_ref: str) -> bytes:
+def _plant_marker(repo: Path, state: str, original_ref: str,
+                  original_sha: Optional[str] = None) -> bytes:
     marker = repo / ".git" / "watchedit_deploy_marker.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
         "state": state, "started": "2026-09-04T00:00:00",
-        "original_ref": original_ref, "original_sha": "deadbeef", "tag": "predeploy/old",
+        "original_ref": original_ref,
+        "original_sha": "deadbeef" if original_sha is None else original_sha,
+        "tag": "predeploy/old",
     }).encode("utf-8")
     marker.write_bytes(payload)
     return payload
@@ -103,7 +107,8 @@ class TestRecoverySemantics:
         _git(repo, "commit", "-m", "second")
         assert _git(repo, "checkout", "master").returncode == 0
         # marker on master claims the deploy interrupted from backup-branch
-        _plant_marker(repo, "APPLYING", "backup-branch")
+        branch_sha = _git(repo, "rev-parse", "backup-branch").stdout.strip()
+        _plant_marker(repo, "APPLYING", "backup-branch", branch_sha)
 
         ok = dl.deploy_local(skip_tests=True, quiet=False, repo_root=repo)
         out = capsys.readouterr().out
@@ -118,6 +123,27 @@ class TestRecoverySemantics:
         # no predeploy tag created by the aborted invocation
         tags = _git(repo, "tag", "-l", "predeploy/*").stdout.split()
         assert tags == [] or all("predeploy/old" == t for t in tags)
+
+    def test_recovery_restores_recorded_commit_not_moved_branch_tip(self, tmp_path, capsys):
+        # T-85: the marker records the commit the deploy started from. A branch
+        # that moves on afterwards must not be treated as that revision, or the
+        # "recovered" tree is whatever the branch happened to become.
+        import deploy_local as dl
+        repo = _mini_repo(tmp_path)
+        recorded = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        (repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "branch moved on after the deploy started")
+        moved_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        assert moved_tip != recorded
+        _plant_marker(repo, "APPLYING", "master", recorded)
+
+        ok = dl.deploy_local(skip_tests=True, quiet=False, repo_root=repo)
+
+        assert ok is False
+        assert dl.last_status() == "RECOVERED"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == recorded
+        assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
     def test_stale_completed_marker_cleaned_and_redeploy_succeeds(self, tmp_path):
         import deploy_local as dl

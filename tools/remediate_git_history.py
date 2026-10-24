@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -35,7 +36,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def remediate(repo: Path, purge: List[str]) -> bool:
-    expr = " ".join(f"git rm -r --cached --ignore-unmatch '{p}'" for p in purge)
+    expr = " ".join(
+        f"git rm -r --cached --ignore-unmatch -- {shlex.quote(p)}"
+        for p in purge
+    )
     env_args = ["-c", "filter.branch.warnEmpty=true"]
     res = subprocess.run(
         ["git", "-C", str(repo)] + env_args +
@@ -48,11 +52,21 @@ def remediate(repo: Path, purge: List[str]) -> bool:
         return False
     # purge old refs left by filter-branch so the blobs become unreachable
     for ref in ("refs/original", "refs/replace"):
-        _git(repo, "for-each-ref", "--format=%(refname)", ref).stdout.strip().splitlines()
         for line in _git(repo, "for-each-ref", "--format=%(refname)", ref).stdout.split():
-            _git(repo, "update-ref", "-d", line.strip())
-    _git(repo, "reflog", "expire", "--expire=now", "--all")
-    _git(repo, "gc", "--prune=now", "--aggressive")
+            dropped = _git(repo, "update-ref", "-d", line.strip())
+            if dropped.returncode != 0:
+                print(f"could not drop {line}: {dropped.stderr.strip()[-200:]}", file=sys.stderr)
+                return False
+    # T-83: filter-branch's exit code is not the remediation's exit code. The
+    # blob is still reachable while refs/original survives and reflogs keep it
+    # in the object store, so discarding those exit codes let a half-done
+    # remediation report "History rewritten" over a still-contaminated repo.
+    for args in (("reflog", "expire", "--expire=now", "--all"),
+                 ("gc", "--prune=now", "--aggressive")):
+        step = _git(repo, *args)
+        if step.returncode != 0:
+            print(f"post-rewrite {args[0]} failed: {step.stderr.strip()[-400:]}", file=sys.stderr)
+            return False
     return True
 
 

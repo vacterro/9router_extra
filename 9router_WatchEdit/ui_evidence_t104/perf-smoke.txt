@@ -1,0 +1,20 @@
+QFontDatabase: Cannot find font directory C:/Users/vac34/AppData/Local/Programs/Python/Python311/Lib/site-packages/PySide6/lib/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+load 2000-model combo + 5000 catalog: 0.431s
+filter 'model-00042'                       11.0ms  visible=0 matches
+filter 'provider 07 claude'                 9.9ms  visible=0 matches
+filter 'prov05/m'                          13.0ms  visible=Showing 75 of 3000 models
+filter 'zzz-nomatch'                        8.8ms  visible=0 matches
+filter 'provider:prov07 model'             17.6ms  visible=Showing 75 of 3000 models
+full right-panel rebuild: 165.3ms
+full left-panel rebuild:  139.3ms
+sort name-asc          18.7ms
+sort provider-asc      14.4ms
+sort health            14.4ms
+sort cost              13.0ms
+sort latency-asc       15.7ms
+sort last-tested       18.9ms
+provider catalog rebuild (40 providers): 27.8ms
+per-probe keyed badge update: 0.028ms avg over 200 probes
+engine calls during all presentation work: 1 (combos fetched once at load)
+combo models still 2000, order preserved: True

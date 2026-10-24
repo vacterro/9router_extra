@@ -20,7 +20,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from config import (
     LIVE_ACCESS_ENV,
@@ -101,41 +101,69 @@ class SecurityManager:
                     pass
 
     # ------------------------------------------------------- local settings
-    def _read_local_settings(self) -> Dict:
+    def _load_local_settings(self) -> Tuple[Dict, Optional[str]]:
+        """Returns (settings, corruption reason). An unreadable or non-object
+        file reports a reason instead of masquerading as an empty document."""
         path = LOCAL_SETTINGS_FILE
         if not path.is_absolute() or not path.exists():
-            return {}
+            return {}, None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {}, f"local settings unreadable: {type(exc).__name__}: {exc}"
+        if not isinstance(parsed, dict):
+            return {}, f"local settings root is {type(parsed).__name__}, expected object"
+        return parsed, None
 
-    def _write_local_settings(self, data: Dict) -> None:
+    def _read_local_settings(self) -> Dict:
+        return self._load_local_settings()[0]
+
+    def _write_local_settings(self, data: Dict) -> Optional[str]:
+        """Merges `data` into the local settings file and returns the reason it
+        could not be written, or None on success.
+
+        T-86: a corrupt local settings file is evidence the operator may still
+        want to recover, not an empty dict to merge onto. Overwriting it made a
+        truncated, partial document look authoritative and silently dropped
+        every other setting, so the write fails closed and the file is left
+        untouched for the operator to inspect.
+        """
         path = LOCAL_SETTINGS_FILE
         if not path.is_absolute():
             # CORE-001: no valid private root -> locked/read-only degradation,
             # never a CWD-relative settings write.
-            return
+            self._settings_error = "no absolute private root; local settings not written"
+            return self._settings_error
+        existing, corruption = self._load_local_settings()
+        if corruption:
+            self._settings_error = corruption
+            return corruption
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            existing = {}
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    existing = {}
             existing.update(data)
             path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        except OSError:
+        except OSError as exc:
             # Storage degraded mid-session: settings stay unsaved, state stays LOCKED.
-            pass
+            # The reason is returned rather than swallowed so the caller (and the
+            # operator) can see why the preference did not persist.
+            self._settings_error = f"{type(exc).__name__}: {exc}"
+            return self._settings_error
+        self._settings_error = None
+        return None
 
     @property
     def trusted_os_unlock_enabled(self) -> bool:
         return bool(self._read_local_settings().get("trusted_os_unlock", False))
 
+    @property
+    def settings_error(self) -> Optional[str]:
+        """Reason the last local settings write failed, or None. A written
+        preference that did not land must never look like it did."""
+        return getattr(self, "_settings_error", None)
+
     def set_trusted_os_unlock(self, enabled: bool) -> None:
-        self._write_local_settings({"trusted_os_unlock": bool(enabled)})
+        self._settings_error = self._write_local_settings(
+            {"trusted_os_unlock": bool(enabled)})
         if enabled:
             self.try_silent_unlock()
 
