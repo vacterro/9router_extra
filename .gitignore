@@ -58,3 +58,7 @@ build/
 
 # --- Live provider/runtime caches (fetched data, never source) ---
 .freebuff/
+
+# --- Node tooling deps (the WatchEdit app is Python; node_modules only
+#      holds the ad-hoc vitest cache used by the 9router build helper) ---
+node_modules/
