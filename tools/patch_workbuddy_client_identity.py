@@ -1,45 +1,42 @@
-"""Restore WorkBuddy AI routing after upstream channel verification (HTTP 400 / code 11128).
+"""WorkBuddy AI client identity: check, repair, and live-verify (HTTP 400 / code 11128).
 
 Background
 ----------
-WorkBuddy's gateway now checks that a chat request looks like it came from an
-official client. 9router's workbuddy executor sent the old CodeBuddy CLI
-fingerprint only (``User-Agent: CLI/2.108.1 CodeBuddy/2.108.1``,
-``X-IDE-Type: CLI``). That request is rejected with::
+WorkBuddy's gateway checks that a chat request came from an official client.
+9router's workbuddy executor used to send only the retired CodeBuddy CLI
+fingerprint (``User-Agent: CLI/2.108.1 CodeBuddy/2.108.1``, ``X-IDE-Type: CLI``)
+and was rejected with::
 
     HTTP 400 {"code":11128,"msg":"request illegal",
               "displayTips":{"en":"... channel verification ... not sent from
                               an official client ..."}}
 
-The official desktop client (WorkBuddy 5.8.4) sends the full identity and
-session header family, and the same token/metadata is accepted:
+The official desktop client (WorkBuddy 5.8.4) sends the full identity family,
+and the same token/metadata is accepted:
 
     User-Agent: WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0
     X-IDE-Type / X-IDE-Name: WorkBuddy
-    X-IDE-Version: 5.8.4
     X-Agent-Intent / -Purpose / -Type: craft / conversation / main
     X-Product: SaaS, X-Domain: www.workbuddy.ai, X-Private-Data: true
     X-Conversation-ID, X-Conversation-Request-ID, X-Root-Request-ID,
     X-Conversation-Message-ID, X-Request-ID, X-Trace-ID, traceparent, b3,
     X-B3-TraceId / SpanId / Sampled
 
-What this tool does
--------------------
-The identity now ships inside the ``9router-*-extra`` package: it lives in
+Where the fix lives now
+-----------------------
+The identity ships INSIDE the ``9router-*-extra`` package - in
 ``open-sse/executors/workbuddy.js`` (a ``buildHeaders`` override) and in the
-``workbuddy`` registry transport headers, so a fresh ``apply-update.ps1``
-install already carries it. ``--check`` reports ``BUILT-IN`` for that case.
+``workbuddy`` registry transport headers - so a fresh install already carries
+it. The declaration that both the upgrade gate and the app read is
+``9router_WatchEdit/core/engine_identity.py``; this tool is the operator-facing
+front end for that same declaration, not a second copy of it.
 
-This tool remains as the runtime repair path for an install built from a
-package that predates that change. It finds the compiled WorkBuddy executor
-class (the one whose constructor calls ``super("workbuddy")``) and adds a
-``buildHeaders`` override that emits the official desktop identity on every
-request. Conversation ids are kept stable per WorkBuddy account, while
-request/message/trace ids are fresh per call, matching the official client.
-
-Idempotent: a chunk carrying the ``__9rWbConv`` marker or the built-in
-identity is skipped. Each modified file is backed up under
-``%LOCALAPPDATA%\\9router_WatchEdit\\engine\\rollback``.
+Automatic repair
+----------------
+``apply-update.ps1`` runs ``tools/engine_identity_gate.py`` after every install,
+and the app checks on every launch, so an install that predates the identity is
+repaired without anyone remembering to do it. Use this tool when you want to
+see or force that by hand.
 
 Usage
 -----
@@ -48,203 +45,102 @@ Usage
     python tools/patch_workbuddy_client_identity.py --verify
     python tools/patch_workbuddy_client_identity.py --restore
 
-``--apply`` edits the installed build; restart 9router afterwards so the new
-chunk is loaded. ``--verify`` asks the running 9router to test the WorkBuddy
-models through its own chat pipeline (one small live request per model).
+``--apply`` edits the installed build; restart 9router afterwards. ``--verify``
+asks the running 9router to test WorkBuddy models through its own chat
+pipeline (one small live request per model).
 
 Note: passing the channel check is not sufficient on its own. WorkBuddy also
-answers ``HTTP 403 {"code":11140,"msg":"request illegal"}`` with "Your account
-has been restricted due to unusual activity" when it has flagged the account
-itself; that is server-side and only an appeal through the official client
-clears it.
+answers ``HTTP 403 {"code":11140,...}`` with "Your account has been restricted
+due to unusual activity" when it has flagged the account itself; that is
+server-side and only an appeal through the official client clears it.
 """
+from __future__ import annotations
 
 import argparse
 import glob
 import hashlib
 import json
 import os
-import re
 import shutil
-import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
+from pathlib import Path
+import httpx
 
-INSTALL = os.environ.get("NINEROUTER_INSTALL", r"C:\nodejs\node_modules\9router")
-SERVER = os.path.join(INSTALL, "app", ".next-cli-build", "server")
-APPDATA_9R = os.path.join(os.environ.get("APPDATA", ""), "9router")
-ROLLBACK = os.path.join(
-    os.environ.get("LOCALAPPDATA", ""), "9router_WatchEdit", "engine", "rollback"
-)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "9router_WatchEdit"))
+
+from core import engine_identity as ei  # noqa: E402
+from core.router_client import validate_router_base_url  # noqa: E402
+from config import APPDATA_ROUTER, redact_secrets  # noqa: E402
+
+APPDATA_9R = str(APPDATA_ROUTER)
 BASE = os.environ.get("NINEROUTER_BASE", "http://127.0.0.1:20128")
 
-MARKER = "__9rWbConv"
-
-# Captured from the official WorkBuddy 5.8.4 desktop client (see README).
-DESKTOP_VERSION = "5.8.4"
-DESKTOP_CLI_VERSION = "2.161.0"
-DESKTOP_UA = (
-    f"WorkBuddy/{DESKTOP_VERSION} workbuddy-ai/{DESKTOP_VERSION} "
-    f"CLI/{DESKTOP_CLI_VERSION}"
-)
-DESKTOP_DOMAIN = "www.workbuddy.ai"
-
-# Inserted verbatim into the compiled class. Kept as one string so the patch is
-# byte-for-byte the same on every run and easy to audit.
-METHOD = (
-    "buildHeaders(a,b=!0,c,d){"
-    "let e=super.buildHeaders(a,b,c,d);"
-    'delete e["x-requested-with"],delete e["x-codebuddy-request"];'
-    "let f=globalThis.__9rWbConv||(globalThis.__9rWbConv=new Map),"
-    'g=(a&&a.providerSpecificData&&a.providerSpecificData.uid)||"default",'
-    "h=f.get(g);h||(h=crypto.randomUUID(),f.set(g,h));"
-    'let i=crypto.randomUUID().replace(/-/g,""),'
-    'j=crypto.randomUUID().replace(/-/g,""),'
-    'k=crypto.randomUUID().replace(/-/g,""),'
-    'l=crypto.randomUUID().replace(/-/g,"").slice(0,16);'
-    "return Object.assign(e,{"
-    f'"User-Agent":"{DESKTOP_UA}",'
-    '"X-Product":"SaaS","X-IDE-Type":"WorkBuddy","X-IDE-Name":"WorkBuddy",'
-    f'"X-IDE-Version":"{DESKTOP_VERSION}",'
-    '"X-Agent-Intent":"craft","X-Agent-Purpose":"conversation","X-Agent-Type":"main",'
-    f'"X-Private-Data":"true","X-Domain":"{DESKTOP_DOMAIN}",'
-    '"X-Conversation-ID":h,"X-Conversation-Request-ID":i,"X-Root-Request-ID":i,'
-    '"X-Conversation-Message-ID":j,"X-Request-ID":j,'
-    '"X-Trace-ID":k,"traceparent":"00-"+k+"-"+l+"-01","b3":k+"-"+l+"-1",'
-    '"X-B3-TraceId":k,"X-B3-SpanId":l,"X-B3-Sampled":"1"},'
-    "(a&&a.providerSpecificData&&a.providerSpecificData.uid)"
-    '?{"X-User-Id":a.providerSpecificData.uid}:{})}'
-)
-
-ANCHOR = re.compile(r'constructor\(\)\{super\("workbuddy"\)\}(?=transformRequest\()')
-
-# Since T-118 the identity lives in open-sse/executors/workbuddy.js and ships
-# inside the 9router-*-extra package, so a fresh install already carries it.
-# --check reports BUILT-IN instead of demanding a runtime patch; --apply then
-# has nothing to do. The ANCHOR above no longer matches those chunks because
-# buildHeaders now sits between the constructor and transformRequest.
-BUILTIN = re.compile(
-    r'super\("workbuddy"\)\}buildHeaders\('
-    r'.{0,4000}?"X-Agent-Intent":"craft"',
-    re.S,
-)
+IDENTITY = ei.ENGINE_IDENTITIES[0]
 
 
-def candidate_chunks():
-    """Compiled server chunks that contain the WorkBuddy executor class."""
-    if not os.path.isdir(SERVER):
+def _backups_for(chunk: str) -> list:
+    directory = ei._backup_dir()
+    if not ei._plain_path(directory):
         return []
-    found = []
-    for root, _dirs, files in os.walk(SERVER):
-        for name in files:
-            if not name.endswith(".js"):
-                continue
-            path = os.path.join(root, name)
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    body = handle.read()
-            except (OSError, UnicodeDecodeError):
-                continue
-            if 'super("workbuddy")' in body:
-                found.append((path, body))
-    return found
+    pattern = os.path.join(directory, glob.escape(os.path.basename(chunk)) + ".*.bak")
+    return sorted((path for path in glob.glob(pattern) if ei._plain_path(path,file=True)),
+                  key=lambda path: (os.stat(path).st_mtime_ns,path))
 
 
-def backup_path(path):
-    os.makedirs(ROLLBACK, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    return os.path.join(ROLLBACK, f"{os.path.basename(path)}.{stamp}.bak")
-
-
-def node_syntax_ok(path):
-    """Best-effort syntax gate; skipped when node is not available."""
-    node = shutil.which("node")
-    if not node:
-        return True, "node not found, syntax check skipped"
-    result = subprocess.run([node, "--check", path], capture_output=True, text=True)
-    return result.returncode == 0, (result.stderr or result.stdout).strip()
-
-
-def apply_patch():
-    chunks = candidate_chunks()
-    if not chunks:
-        print(f"FAIL: no WorkBuddy executor chunk under {SERVER}")
+def apply_patch() -> int:
+    state = ei.check_one(IDENTITY)
+    if state.state == ei.IDENTITY_UNAVAILABLE:
+        print(f"FAIL: {state.detail}")
         return 1
+    if state.ok:
+        print(f"Nothing to do: {IDENTITY.provider} already carries the desktop identity ({state.chunk}).")
+        return 0
 
-    changed = 0
-    already = 0
-    for path, body in chunks:
-        if MARKER in body or BUILTIN.search(body):
-            print(f"already carries the desktop identity: {path}")
-            already += 1
-            continue
-        match = ANCHOR.search(body)
-        if not match:
-            print(f"SKIP: not the executor chunk: {path}")
-            continue
-
-        patched = body[: match.end()] + METHOD + body[match.end():]
-        backup = backup_path(path)
-        shutil.copy2(path, backup)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(patched)
-
-        ok, detail = node_syntax_ok(path)
-        if not ok:
-            shutil.copy2(backup, path)
-            print(f"FAIL: patched file does not parse, restored from {backup}\n{detail}")
-            return 1
-
-        changed += 1
-        print(f"patched: {path}\n  backup: {backup}")
-
-    if not changed and already:
-        print("Nothing to do: the WorkBuddy identity patch is already applied.")
-    elif not changed:
-        print("FAIL: no WorkBuddy executor chunk could be patched")
+    backups: list = []
+    repaired = ei.repair_one(IDENTITY, None, backups)
+    if not repaired.ok:
+        print(f"FAIL: {IDENTITY.provider} identity could not be restored: {repaired.summary()}")
         return 1
-    else:
-        print("Restart 9router to load the patched chunk.")
+    for backup in backups:
+        print(f"patched: {repaired.chunk}\n  backup: {backup}")
+    print("Restart 9router to load the patched chunk.")
     return 0
 
 
-def check_patch():
-    chunks = candidate_chunks()
-    if not chunks:
-        print(f"FAIL: no WorkBuddy executor chunk under {SERVER}")
-        return 1
-    executor = [(path, body) for path, body in chunks
-                if MARKER in body or BUILTIN.search(body) or ANCHOR.search(body)]
-    if not executor:
-        print(f"FAIL: no WorkBuddy executor chunk under {SERVER}")
-        return 1
-    missing = [path for path, body in executor
-               if MARKER not in body and not BUILTIN.search(body)]
-    if missing:
-        for path in missing:
-            print(f"NOT PATCHED: {path}")
-        return 1
-    for path, body in executor:
-        print(f"{'BUILT-IN' if BUILTIN.search(body) else 'PATCHED'}: {path}")
-    return 0
+def check_patch() -> int:
+    states = ei.check()
+    for state in states:
+        if state.ok:
+            label = "BUILT-IN" if "patch marker" not in state.detail else "PATCHED"
+            print(f"{label}: {state.chunk}")
+        elif state.state == ei.IDENTITY_MISSING:
+            print(f"NOT PATCHED: {state.chunk or state.provider}\n  {state.summary()}")
+        else:
+            print(f"UNAVAILABLE: {state.summary()}")
+    return 0 if ei.all_ok(states) else 1
 
 
-def restore_patch():
-    chunks = candidate_chunks()
-    if not chunks:
-        print(f"FAIL: no WorkBuddy executor chunk under {SERVER}")
-        return 1
+def restore_patch() -> int:
+    states = ei.check()
     restored = 0
-    for path, _body in chunks:
-        pattern = os.path.join(ROLLBACK, os.path.basename(path) + ".*.bak")
-        backups = sorted(glob.glob(pattern))
-        if not backups:
-            print(f"no backup for {path}")
+    for state in states:
+        if not state.chunk:
             continue
-        shutil.copy2(backups[-1], path)
-        print(f"restored: {path} <- {backups[-1]}")
+        try:
+            backups = _backups_for(state.chunk)
+        except OSError:
+            print("FAIL: private rollback storage unavailable")
+            continue
+        if not backups:
+            print(f"no backup for {state.chunk}")
+            continue
+        current_backup, reason = ei.restore_chunk(state.chunk, backups[-1])
+        if current_backup is None:
+            print("FAIL: " + redact_secrets(reason))
+            continue
+        print(f"restored: {state.chunk} <- {backups[-1]}")
+        print(f"current chunk preserved: {current_backup}")
         restored += 1
     if not restored:
         return 1
@@ -252,7 +148,7 @@ def restore_patch():
     return 0
 
 
-def cli_token():
+def cli_token() -> str:
     with open(os.path.join(APPDATA_9R, "machine-id"), encoding="utf-8") as handle:
         raw = handle.read().strip()
     with open(os.path.join(APPDATA_9R, "auth", "cli-secret"), encoding="utf-8") as handle:
@@ -260,27 +156,34 @@ def cli_token():
     return hashlib.sha256((raw + "9r-cli-auth" + secret).encode("utf-8")).hexdigest()[:16]
 
 
-def verify(models):
-    token = cli_token()
+def verify(models) -> int:
+    try:
+        base = validate_router_base_url(BASE)
+    except ValueError:
+        print("FAIL: verification requires an explicit numeric loopback endpoint")
+        return 1
+    try:
+        token = cli_token()
+    except (OSError,UnicodeError):
+        print("FAIL: local authentication unavailable")
+        return 1
     failures = 0
     for model in models:
-        request = urllib.request.Request(
-            BASE + "/api/models/test",
-            method="POST",
-            headers={"x-9r-cli-token": token, "Content-Type": "application/json"},
-            data=json.dumps({"model": model}).encode("utf-8"),
-        )
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            print(f"FAIL {model}: {exc}")
+            with httpx.Client(timeout=90,follow_redirects=False,trust_env=False) as client:
+                response = client.post(base + "/api/models/test",headers={"x-9r-cli-token":token},json={"model":model})
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload,dict):
+                    raise ValueError("Model test response was not an object")
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            print(f"FAIL {redact_secrets(model)}: {redact_secrets(str(exc))}")
             failures += 1
             continue
         if payload.get("ok"):
-            print(f"PASS {model}: {payload.get('latencyMs')} ms")
+            print(f"PASS {redact_secrets(model)}: {redact_secrets(str(payload.get('latencyMs')))} ms")
         else:
-            print(f"FAIL {model}: {str(payload.get('error'))[:240]}")
+            print(f"FAIL {redact_secrets(model)}: {redact_secrets(str(payload.get('error')))[:240]}")
             failures += 1
     return 1 if failures else 0
 
@@ -289,7 +192,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--apply", action="store_true", help="patch the installed build")
-    group.add_argument("--check", action="store_true", help="report patch state")
+    group.add_argument("--check", action="store_true", help="report identity state")
     group.add_argument("--restore", action="store_true", help="restore the newest backup")
     group.add_argument("--verify", action="store_true", help="live-test WorkBuddy models")
     parser.add_argument(

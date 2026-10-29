@@ -51,7 +51,7 @@ import stat
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 #: Default install root. Overridable for tests and non-standard installs.
 DEFAULT_INSTALL = os.environ.get("NINEROUTER_INSTALL", r"C:\nodejs\node_modules\9router")
@@ -403,47 +403,69 @@ def repair_one(
         state.detail = "executor already declares buildHeaders; rebuild the package instead"
         return state
 
+    patched = body[:match.end()] + _patch_method(identity) + body[match.end():]
+    backup, detail = _replace_chunk(chunk, body.encode('utf-8'), patched.encode('utf-8'))
+    if backup is None:
+        state.detail = detail
+        return state
+    if record is not None:
+        record.append(backup)
+    return check_one(identity, install)
+
+
+def _replace_chunk(chunk: str, original: bytes, replacement: bytes) -> Tuple[Optional[str], str]:
+    """One shared staged/syntax-checked transaction for repair and restore."""
+    if not _plain_path(chunk, file=True):
+        return None, "linked or shared chunk refused; original preserved"
     lock = chunk + ".identity.lock"
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
-        state.detail = "another repair owns this chunk or the repair lock is unavailable"
-        return state
+        return None, "another repair owns this chunk or the repair lock is unavailable"
+    lock_info = os.fstat(fd)
+    lock_identity = lock_info.st_dev, lock_info.st_ino
+    def owns_lock():
+        try:
+            info = os.lstat(lock)
+            return (info.st_dev,info.st_ino) == lock_identity and not stat.S_ISLNK(info.st_mode)
+        except OSError:
+            return False
     staged = None
     try:
         os.close(fd)
-        original = Path(chunk).read_bytes()
-        if original.decode("utf-8") != body or not _plain_path(chunk, file=True):
-            state.detail = "chunk changed during review; original preserved"
-            return state
-        patched = body[:match.end()] + _patch_method(identity) + body[match.end():]
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
-                                         suffix=".js", dir=os.path.dirname(chunk), delete=False) as handle:
+        if Path(chunk).read_bytes() != original or not _plain_path(chunk, file=True):
+            return None, "chunk changed during review; original preserved"
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".js", dir=os.path.dirname(chunk), delete=False) as handle:
             staged = handle.name
-            handle.write(patched)
+            handle.write(replacement)
         if not _node_syntax_ok(staged):
-            state.detail = "patch syntax verification unavailable or failed; original preserved"
-            return state
+            return None, "patch syntax verification unavailable or failed; original preserved"
         if not _plain_path(chunk, file=True) or Path(chunk).read_bytes() != original:
-            state.detail = "chunk changed during syntax verification; original preserved"
-            return state
+            return None, "chunk changed during syntax verification; original preserved"
         backup = backup_chunk(chunk)
-        if Path(backup).read_bytes() != original or Path(chunk).read_bytes() != original:
-            state.detail = "chunk changed during backup; current chunk preserved"
-            return state
+        if Path(backup).read_bytes() != original or Path(chunk).read_bytes() != original or not owns_lock():
+            return None, "chunk or lock changed during backup; current chunk preserved"
         shutil.copymode(chunk, staged)
         os.replace(staged, chunk)
         staged = None
-        if record is not None:
-            record.append(backup)
-        return check_one(identity, install)
+        return backup, ""
     except (OSError, UnicodeError) as exc:
-        state.detail = "repair could not complete; original or rollback copy preserved: " + str(exc)
-        return state
+        return None, "repair could not complete; original or rollback copy preserved: " + str(exc)
     finally:
         if staged is not None:
             os.unlink(staged)
-        os.unlink(lock)
+        if owns_lock():
+            os.unlink(lock)
+
+
+def restore_chunk(chunk: str, backup: str) -> Tuple[Optional[str], str]:
+    """Restore a plain rollback file while backing up the current plain chunk."""
+    if not _plain_path(chunk,file=True) or not _plain_path(backup,file=True):
+        return None, "linked or shared chunk/backup refused; current chunk preserved"
+    try:
+        return _replace_chunk(chunk,Path(chunk).read_bytes(),Path(backup).read_bytes())
+    except OSError as exc:
+        return None, "restore unavailable: " + str(exc)
 
 
 def repair(
