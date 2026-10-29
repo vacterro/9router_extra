@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import DEFAULT_GLOBAL_CONCURRENCY, SETTINGS_FILE
-from core.router_client import RouterClient
+from core.router_client import ComboWriteError, RouterClient
 from core.history import (
     CacheLoadState,
     HealthCache,
@@ -242,6 +242,12 @@ class MainWindow(QMainWindow):
         # work happens strictly on explicit user actions (T-33).
         self._initial_fast_load()
 
+        # T-119: an install can also be made by hand, or by an older package, so
+        # the client-identity declaration is verified on every launch. A stale
+        # identity is repaired here instead of surfacing weeks later as an
+        # upstream HTTP 400 in a chat window.
+        self._check_engine_identity()
+
     def _setup_ui(self):
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
@@ -404,6 +410,38 @@ class MainWindow(QMainWindow):
             )
             self.status_bar.showMessage(
                 f"Health cache {self.cache.load_state.value}: {detail} ({recovery})."
+            )
+
+    def _check_engine_identity(self):
+        """Verify the installed engine carries each provider's official client
+        identity, repairing a legacy install (T-119).
+
+        Runs on every launch because an install can bypass apply-update.ps1
+        entirely. It is a ~60 ms scan of compiled JavaScript, it never touches
+        credentials, and a failure is reported in the status bar rather than as
+        a modal: the app stays usable, the affected provider just will not serve.
+        """
+        try:
+            from core.engine_identity import ensure
+
+            result = ensure()
+        except Exception as exc:  # a broken check must never block startup
+            self.status_bar.showMessage(f"Client identity check unavailable: {exc}")
+            return
+
+        outcome = result.get("outcome")
+        if outcome == "OK" or outcome == "UNAVAILABLE":
+            return
+        messages = "; ".join(result.get("messages") or [])
+        if outcome == "REPAIRED":
+            self.status_bar.showMessage(
+                f"Client identity repaired for the installed engine ({messages}). "
+                "Restart 9router to load the repaired build."
+            )
+        else:
+            self.status_bar.showMessage(
+                f"Client identity check failed: {messages}. "
+                "Rebuild the 9router-*-extra package; these providers will reject requests."
             )
 
     def _open_security_controls(self):
@@ -1019,10 +1057,9 @@ class MainWindow(QMainWindow):
         except LiveAccessLockedError as ex:
             QMessageBox.warning(self, "Secrets Locked", str(ex))
             return False
-        if not res:
+        except ComboWriteError as exc:
             QMessageBox.critical(
-                self, "Apply Failed",
-                "Failed to apply SAIFREN update to 9Router (fail-closed); nothing was written."
+                self, "Apply Failed", exc.message_for_ui()
             )
             return False
         live_combos = self._read_live_combos()

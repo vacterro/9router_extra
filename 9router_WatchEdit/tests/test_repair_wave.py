@@ -3,6 +3,7 @@ Tests for Correctness + Control-Plane Repair Wave (Acceptance Gates A-J)
 """
 import pytest
 import asyncio
+import httpx
 from unittest.mock import MagicMock, patch
 
 from core.classification import (
@@ -14,7 +15,7 @@ from core.classification import (
     get_ui_badge,
 )
 from core.history import HealthCache, ModelHealthRecord
-from core.router_client import RouterClient
+from core.router_client import ComboWriteError, RouterClient
 from core.combo_manager import StableCombo, compute_combo_diff, PresetManager
 from core.discovery import DiscoveredModel
 from core.probe import ScannerWorker, ScanMode, ProviderCircuitBreaker
@@ -178,15 +179,24 @@ def test_gate_g_two_stage_timeout_configuration(tmp_path):
     assert worker.slow_timeout == 15.0
 
 # Gate H: Fail-closed combo update: API failure does NOT touch SQLite
-def test_gate_h_fail_closed_combo_update(tmp_path):
-    client = RouterClient(db_path=tmp_path / "fake.sqlite")
-    
-    # Mock httpx PUT to fail
-    with patch("httpx.put", side_effect=Exception("API connection refused")):
-        res = client.update_combo("combo-1", "TestCombo", ["m1", "m2"])
-        assert res is None
-        # Assert fake sqlite file was NEVER created or touched
-        assert not (tmp_path / "fake.sqlite").exists()
+@pytest.mark.parametrize('existing', [False, True])
+def test_gate_h_fail_closed_combo_update(tmp_path, monkeypatch, existing):
+    database = tmp_path / "fake.sqlite"
+    if existing:
+        database.write_bytes(b"fixture database must remain unchanged")
+    client = RouterClient(db_path=database)
+    monkeypatch.setattr(client, '_get_headers', lambda: {})
+    real_client = httpx.Client
+    def refused(request):
+        raise httpx.ConnectError("fixture connection refused", request=request)
+    transport = httpx.MockTransport(refused)
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: real_client(transport=transport, **kwargs))
+    with pytest.raises(ComboWriteError) as caught:
+        client.update_combo("combo-1", "TestCombo", ["m1", "m2"])
+    assert caught.value.kind == 'transport'
+    assert database.exists() is existing
+    if existing:
+        assert database.read_bytes() == b"fixture database must remain unchanged"
 
 # Gate I: Optimistic Concurrency Conflict Detection
 def test_gate_i_optimistic_concurrency_detection():

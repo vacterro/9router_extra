@@ -111,3 +111,40 @@ def test_preset_manager(tmp_path):
     pm2 = PresetManager(presets_file=tmp_path / "presets.json")
     assert "MY_TEST_PRESET" in pm2.presets
     assert "cog/swe-1.6-slow" in pm2.presets["SAIFREN_FREE"].models
+
+
+def test_move_to_top_and_bottom():
+    combo = StableCombo(
+        combo_id="t",
+        name="C",
+        models=["a", "b", "c", "d"],
+    )
+
+    # To top moves last element to index 0, preserving relative order.
+    assert combo.move_to_top("d")
+    assert combo.models == ["d", "a", "b", "c"]
+
+    # Already at top: no-op, no mutation.
+    assert not combo.move_to_top("d")
+    assert combo.models == ["d", "a", "b", "c"]
+
+    # To bottom moves first element to last.
+    assert combo.move_to_bottom("d")
+    assert combo.models == ["a", "b", "c", "d"]
+
+    # Already at bottom: no-op.
+    assert not combo.move_to_bottom("d")
+    assert combo.models == ["a", "b", "c", "d"]
+
+    # Mid-list moves to top.
+    assert combo.move_to_top("c")
+    assert combo.models == ["c", "a", "b", "d"]
+
+    # Mid-list moves to bottom.
+    assert combo.move_to_bottom("c")
+    assert combo.models == ["a", "b", "d", "c"]
+
+    # Unknown model: no-op, False.
+    assert not combo.move_to_top("nope")
+    assert not combo.move_to_bottom("nope")
+    assert combo.models == ["a", "b", "d", "c"]

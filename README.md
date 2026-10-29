@@ -90,6 +90,27 @@ post-install patch.
 for an install built from an older package; `--check` reports `BUILT-IN` when
 the identity already ships in the build.
 
+### Self-healing guard
+The identity is also *declared*, not just shipped, so an install that loses it
+repairs itself. `9router_WatchEdit/core/engine_identity.py` holds one
+`ProviderIdentity` per provider: the header tokens that must be present, the
+retired ones that must be gone, the module that owns them, and the symptom a
+user would see. Two callers enforce it:
+
+* **Every upgrade.** `apply-update.ps1` runs `tools/engine_identity_gate.py`
+  immediately after `npm install` and before the success banner. A missing
+  identity is repaired in place with a backup; a chunk that cannot be repaired
+  aborts the upgrade instead of installing a build that fails in chat.
+* **Every launch.** The app verifies the installed engine at startup and
+  repairs it silently, so a hand-made install or a package from another source
+  does not surface as an HTTP 400 weeks later.
+
+```powershell
+python tools/engine_identity_gate.py                 # check + repair, exit 1 if unrepairable
+python tools/engine_identity_gate.py --check-only --json
+python tools/engine_identity_gate.py --install "C:\nodejs\node_modules\9router"
+```
+
 ```powershell
 python tools/patch_workbuddy_client_identity.py --check    # BUILT-IN or needs patching?
 python tools/patch_workbuddy_client_identity.py --apply    # patch + backup, then restart 9router
@@ -115,5 +136,6 @@ This will:
 1. Stop the running 9router instance.
 2. Create a timestamped backup in `%APPDATA%\9router_backup_<timestamp>`.
 3. Install `9router-0.5.65-extra.tgz` globally.
-4. Synchronize all connections and update the SAIFREN combo.
-5. Restart 9router in tray mode.
+4. Verify (and if needed repair) the installed client identities.
+5. Synchronize all connections and update the SAIFREN combo.
+6. Restart 9router in tray mode.

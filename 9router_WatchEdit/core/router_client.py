@@ -47,6 +47,49 @@ class OfflineRecoveryRefused(RuntimeError):
     """
 
 
+class ComboWriteError(RuntimeError):
+    """Raised when a combo write fails at the transport or HTTP level.
+
+    Carries enough context for the UI to distinguish a network/timeout
+    failure from an HTTP-level rejection, instead of both collapsing to
+    ``None`` and looking identical to a legitimate empty response.
+
+    Attributes:
+        kind: "transport" for connection/timeout errors, "http" for
+            HTTP-level rejections (4xx/5xx that are not a recognized success).
+        status_code: the HTTP status code if known (``None`` for transport).
+        detail: human-readable reason for the failure.
+    """
+
+    def __init__(self, kind: str, status_code: Optional[int], detail: str):
+        self.kind = kind
+        self.status_code = status_code
+        self.detail = " ".join(re.sub(r"https?://\S+", "[endpoint]", redact_secrets(detail)).split())
+        super().__init__(f"{kind} failure ({self.detail})")
+
+    def message_for_ui(self) -> str:
+        """A single-line, operator-facing message that does not leak the URL."""
+        if self.kind == "transport":
+            return f"Could not reach 9Router to write the combo: {self.detail}"
+        if self.status_code is not None:
+            return f"9Router rejected the combo write (HTTP {self.status_code}): {self.detail}"
+        return f"9Router rejected the combo write: {self.detail}"
+
+
+def _combo_write_response(response, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    if not response.content:
+        return fallback
+    try:
+        payload = response.json()
+    except (ValueError, UnicodeError) as exc:
+        raise ComboWriteError("response", response.status_code,
+                              "Write response was not valid JSON; verify the current combo before retrying.") from exc
+    if not isinstance(payload, dict):
+        raise ComboWriteError("response", response.status_code,
+                              "Write response was not an object; verify the current combo before retrying.")
+    return payload
+
+
 class OfflineState(enum.Enum):
     """Result of the positive offline-verification boundary (CORE-001).
 
@@ -526,38 +569,45 @@ class RouterClient:
             return ("INVALID", [])
         return ("OK", combos)
 
-    def create_combo(self, name: str, models: List[str], kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Create new combo via API."""
-        self._require_live("create_combo")
-        try:
-            headers = self._get_headers()
-            payload = {"name": name, "models": models, "kind": kind}
-            with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
-                res = client.post(f"{self.base_url}/api/combos", headers=headers, json=payload)
-                if res.status_code in (200, 201):
-                    return res.json()
-        except Exception:
-            pass
-        return None
+    def create_combo(self, name: str, models: List[str], kind: Optional[str] = None) -> Dict[str, Any]:
+        """Create new combo via API.
 
-    def update_combo(self, combo_id: str, name: str, models: List[str], kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        Raises ComboWriteError for transport/HTTP failures; returns the parsed
+        response dict on success. A 204 No Content with no body is synthesized
+        into a dict so callers never see a falsy-but-successful result.
         """
-        Updates combo via 9Router REST API (triggers resetComboRotation in engine memory).
-        FAILS CLOSED: Never automatically falls back to direct SQLite mutation.
+        self._require_live("create_combo")
+        headers = self._get_headers()
+        payload = {"name": name, "models": models, "kind": kind}
+        with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
+            try:
+                res = client.post(f"{self.base_url}/api/combos", headers=headers, json=payload)
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                raise ComboWriteError("transport", None, str(exc)) from exc
+            if res.status_code in (200, 201, 204):
+                return _combo_write_response(res, {"name": name, "models": models, "kind": kind})
+            raise ComboWriteError("http", res.status_code, res.text[:240])
+
+    def update_combo(self, combo_id: str, name: str, models: List[str], kind: Optional[str] = None) -> Dict[str, Any]:
+        """Updates combo via 9Router REST API (triggers resetComboRotation).
+
+        FAILS CLOSED: never falls back to direct SQLite mutation.
+        Raises ComboWriteError for transport/HTTP failures; returns the parsed
+        response dict on success (synthesized for 204 No Content).
         """
         self._require_live("update_combo")
-        try:
-            headers = self._get_headers()
-            payload = {"name": name, "models": models, "kind": kind}
-            with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
+        headers = self._get_headers()
+        payload = {"name": name, "models": models, "kind": kind}
+        with httpx.Client(timeout=8.0, follow_redirects=False, trust_env=False) as client:
+            try:
                 res = client.put(f"{self.base_url}/api/combos/{combo_id}", headers=headers, json=payload)
-                if res.status_code in (200, 204):
-                    return res.json() if res.content else {"id": combo_id, "name": name, "models": models}
-        except Exception:
-            pass
-        return None
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                raise ComboWriteError("transport", None, str(exc)) from exc
+            if res.status_code in (200, 204):
+                return _combo_write_response(res, {"id": combo_id, "name": name, "models": models})
+            raise ComboWriteError("http", res.status_code, res.text[:240])
 
-    def rename_combo(self, combo_id: str, new_name: str, current_models: List[str], kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def rename_combo(self, combo_id: str, new_name: str, current_models: List[str], kind: Optional[str] = None) -> Dict[str, Any]:
         """Renames a combo through the official update API."""
         return self.update_combo(combo_id=combo_id, name=new_name, models=current_models, kind=kind)
 

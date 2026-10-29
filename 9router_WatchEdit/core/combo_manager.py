@@ -362,6 +362,26 @@ class StableCombo:
             return True
         return False
 
+    def move_to_top(self, canonical_id: str) -> bool:
+        """Moves one model to the first routing position (index 0)."""
+        if canonical_id not in self.models or not self.models:
+            return False
+        idx = self.models.index(canonical_id)
+        if idx == 0:
+            return False
+        self.models.insert(0, self.models.pop(idx))
+        return True
+
+    def move_to_bottom(self, canonical_id: str) -> bool:
+        """Moves one model to the last routing position (index len-1)."""
+        if canonical_id not in self.models or not self.models:
+            return False
+        idx = self.models.index(canonical_id)
+        if idx == len(self.models) - 1:
+            return False
+        self.models.insert(len(self.models) - 1, self.models.pop(idx))
+        return True
+
     def reorder_model(self, canonical_id: str, new_index: int) -> bool:
         if canonical_id not in self.models:
             return False

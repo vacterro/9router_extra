@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
-from core.router_client import RouterClient
+from core.router_client import ComboWriteError, RouterClient
 from core.history import HealthCache
 from core.discovery import DiscoveredModel
 from core.combo_manager import StableCombo, compute_combo_diff, ComboDiff
@@ -521,11 +521,21 @@ class ComboEditorView(QWidget):
         self.btn_move_down = QPushButton("▼ Down")
         self.btn_move_down.clicked.connect(self._move_down)
 
+        # Shift+arrow the same span in one jump: the modifier is what the
+        # operator already reaches for, so the buttons stay the plain span.
+        self.btn_move_top = QPushButton("⇧↑ Top")
+        self.btn_move_top.clicked.connect(self._move_to_top)
+
+        self.btn_move_bottom = QPushButton("⇩↓ Bottom")
+        self.btn_move_bottom.clicked.connect(self._move_to_bottom)
+
         self.btn_remove = QPushButton("✖ Remove")
         self.btn_remove.clicked.connect(self._remove_selected)
 
         reorder_bar.addWidget(self.btn_move_up)
         reorder_bar.addWidget(self.btn_move_down)
+        reorder_bar.addWidget(self.btn_move_top)
+        reorder_bar.addWidget(self.btn_move_bottom)
         reorder_bar.addWidget(self.btn_remove)
         left_layout.addLayout(reorder_bar)
 
@@ -704,7 +714,33 @@ class ComboEditorView(QWidget):
                     search.take_focus()
                     event.accept()
                     return
+        if self._handle_shift_arrow(event):
+            return
         super().keyPressEvent(event)
+
+    def _handle_shift_arrow(self, event) -> bool:
+        """Shift+arrow moves the selected combo model to the span's edge.
+
+        Only consumed when the combo list owns focus: that list's order IS
+        routing priority, so the shortcut targets it unambiguously. The picker
+        keeps its own arrow navigation. Disabled while a filter is active, so
+        a hidden row can never be silently dragged to an edge.
+        """
+        if not (event.modifiers() & Qt.ShiftModifier):
+            return False
+        key = event.key()
+        if key not in (Qt.Key_Up, Qt.Key_Down):
+            return False
+        if QApplication.focusWidget() is not self.list_combo_models:
+            return False
+        if self._combo_explorer.query.is_filtering():
+            return False
+        if key == Qt.Key_Up:
+            self._move_to_top()
+        else:
+            self._move_to_bottom()
+        event.accept()
+        return True
 
     def _is_editing_control(self, widget: QWidget) -> bool:
         """True when the focused widget is itself a text editor."""
@@ -1264,12 +1300,17 @@ class ComboEditorView(QWidget):
         self.list_combo_models.setDragEnabled(not filtering)
         self.btn_move_up.setEnabled(not filtering)
         self.btn_move_down.setEnabled(not filtering)
+        self.btn_move_top.setEnabled(not filtering)
+        self.btn_move_bottom.setEnabled(not filtering)
         if filtering:
-            self.btn_move_up.setToolTip("Restore the combo view to reorder (Reset filters).")
-            self.btn_move_down.setToolTip("Restore the combo view to reorder (Reset filters).")
+            for btn in (self.btn_move_up, self.btn_move_down,
+                        self.btn_move_top, self.btn_move_bottom):
+                btn.setToolTip("Restore the combo view to reorder (Reset filters).")
         else:
             self.btn_move_up.setToolTip("Move the selected model up one routing position.")
             self.btn_move_down.setToolTip("Move the selected model down one routing position.")
+            self.btn_move_top.setToolTip("Move the selected model to the top of the combo.")
+            self.btn_move_bottom.setToolTip("Move the selected model to the bottom of the combo.")
 
     def _select_visible_in_combo(self):
         for cid, item in self._combo_item_by_cid.items():
@@ -1825,6 +1866,28 @@ class ComboEditorView(QWidget):
             self._refresh_combo_models_list()
             self._select_in_combo_list(cid)
 
+    def _move_to_top(self):
+        if not self.current_combo:
+            return
+        selected = self.list_combo_models.selectedItems()
+        if not selected:
+            return
+        cid = selected[0].data(Qt.UserRole)
+        if self.current_combo.move_to_top(cid):
+            self._refresh_combo_models_list()
+            self._select_in_combo_list(cid)
+
+    def _move_to_bottom(self):
+        if not self.current_combo:
+            return
+        selected = self.list_combo_models.selectedItems()
+        if not selected:
+            return
+        cid = selected[0].data(Qt.UserRole)
+        if self.current_combo.move_to_bottom(cid):
+            self._refresh_combo_models_list()
+            self._select_in_combo_list(cid)
+
     def _remove_selected(self):
         if not self.current_combo:
             return
@@ -1993,15 +2056,21 @@ class ComboEditorView(QWidget):
 
         # 3. APPLY via 9Router API (Fail-Closed)
         self._set_apply_state("Applying…", "info")
-        res = self.client.update_combo(
-            combo_id=self.current_combo.id,
-            name=self.current_combo.name,
-            models=publish_models,
-            kind=self.current_combo.kind,
-        )
-        if not res:
+        try:
+            res = self.client.update_combo(
+                combo_id=self.current_combo.id,
+                name=self.current_combo.name,
+                models=publish_models,
+                kind=self.current_combo.kind,
+            )
+        except ComboWriteError as exc:
             self._set_apply_state("Failed: not applied", "error")
-            QMessageBox.critical(self, "Apply Failed", "Failed to apply combo update to 9Router backend (fail-closed).")
+            QMessageBox.critical(self, "Apply Failed", exc.message_for_ui())
+            return
+
+        if res is None or res is False:
+            self._set_apply_state("Failed: not applied", "error")
+            QMessageBox.critical(self, "Apply Failed", "9Router did not confirm the write. Local edits are preserved.")
             return
 
         # 4. VERIFY: Read-back confirmation directly from engine.
@@ -2109,14 +2178,19 @@ class ComboEditorView(QWidget):
         # step 1, never the dirty local values -- otherwise a rename silently
         # persists unsaved model edits. A combined name+models mutation is the
         # Save path's job, with its own full diff confirmation.
-        res = self.client.rename_combo(
-            combo_id=cid,
-            new_name=target_name,
-            current_models=list(server_models),
-            kind=server_kind,
-        )
-        if not res:
-            QMessageBox.critical(self, "Rename Failed", "Failed to rename combo in 9Router (fail-closed).")
+        try:
+            res = self.client.rename_combo(
+                combo_id=cid,
+                new_name=target_name,
+                current_models=list(server_models),
+                kind=server_kind,
+            )
+        except ComboWriteError as exc:
+            QMessageBox.critical(self, "Rename Failed", exc.message_for_ui())
+            return
+
+        if res is None or res is False:
+            QMessageBox.critical(self, "Rename Failed", "9Router did not confirm the rename. Local edits are preserved.")
             return
 
         # 3. VERIFY: Read-back confirmation directly from engine
@@ -2294,6 +2368,9 @@ class ComboEditorView(QWidget):
             except LiveAccessLockedError as ex:
                 QMessageBox.warning(self, "Secrets Locked", str(ex))
                 return
+            except ComboWriteError as ex:
+                QMessageBox.critical(self, "Create Failed", ex.message_for_ui())
+                return
             if res:
                 self.load_combos_from_9router()
                 for i in range(self.cb_combo_selector.count()):
@@ -2313,6 +2390,9 @@ class ComboEditorView(QWidget):
             res = self.client.create_combo(name=new_name, models=list(source.models))
         except LiveAccessLockedError as ex:
             QMessageBox.warning(self, "Secrets Locked", str(ex))
+            return
+        except ComboWriteError as ex:
+            QMessageBox.critical(self, "Duplicate Failed", ex.message_for_ui())
             return
         if res:
             new_id = res.get("id") if isinstance(res, dict) else None

@@ -21,6 +21,15 @@ param(
     [string]$BackupParent = "",
     [string]$LaunchCommand = "9router -t --skip-update",
     [int]$LaunchVerifySeconds = 6,
+    # Client-identity gate: after the install, verify every provider whose
+    # upstream checks the client still carries the official identity, and repair
+    # a package that predates it. This is what stops the WorkBuddy HTTP 400 code
+    # 11128 from returning after an upgrade.
+    [string]$PythonExe = "python",
+    [string]$IdentityTool = "",
+    # Install root the identity gate inspects (npm's global prefix by default).
+    [string]$InstallRoot = $env:NINEROUTER_INSTALL,
+    [switch]$SkipIdentityCheck,
     [switch]$SkipStop,
     [switch]$SkipLaunch
 )
@@ -45,6 +54,9 @@ if (-not $RestoreScript) {
 }
 if (-not $ExportFile) {
     $ExportFile = Join-Path $env:LOCALAPPDATA "9router_WatchEdit/backups/private/providers-state-export.json"
+}
+if (-not $IdentityTool) {
+    $IdentityTool = Join-Path $PSScriptRoot "tools/engine_identity_gate.py"
 }
 if (-not $AppDataRouter) {
     $AppDataRouter = Join-Path $env:APPDATA "9router"
@@ -142,11 +154,39 @@ if (-not (Test-Path $PackagePath)) {
     Fail "Patched package not found at: $PackagePath"
 }
 
-Write-Host "`n[3/5] Installing $PackageName globally via npm..." -ForegroundColor Yellow
+Write-Host "`n[3/6] Installing $PackageName globally via npm..." -ForegroundColor Yellow
 Invoke-NativeChecked -Label "npm install" -Exe $NpmExe -ExeArgs @("install", "-g", "--force", "$PackagePath") | Out-Null
 
+# 3b. Client-identity gate. Some upstreams (WorkBuddy) reject any request that
+# does not carry their official desktop identity, answering HTTP 400 code 11128
+# "request illegal". A package that predates that identity used to fail this
+# silently and only the operator noticed, weeks later, in a chat window. The
+# gate reads the same declaration the app checks at startup, repairs a legacy
+# install (keeping a backup), and fails the upgrade rather than reporting success
+# over an engine that cannot serve those models.
+Write-Host "`n[4/6] Verifying installed client identities..." -ForegroundColor Yellow
+if ($SkipIdentityCheck) {
+    Write-Host "Client-identity gate skipped by -SkipIdentityCheck; identity verification NOT performed." -ForegroundColor Yellow
+} else {
+    if (-not (Test-Path -LiteralPath $IdentityTool -PathType Leaf)) {
+        Fail "Client-identity gate tool not found: $IdentityTool"
+    }
+    if (-not $InstallRoot) {
+        try {
+            $globalRoot = & $NpmExe root -g
+            if ($LASTEXITCODE -ne 0) { Fail "npm root -g failed" }
+            $globalRoot = "$globalRoot".Trim()
+            if (-not [IO.Path]::IsPathRooted($globalRoot)) { Fail "npm root -g did not return an absolute path" }
+            $InstallRoot = Join-Path $globalRoot "9router"
+        } catch {
+            Fail "Installed engine root could not be resolved: $($_.Exception.Message)"
+        }
+    }
+    Invoke-NativeChecked -Label "client identity" -Exe $PythonExe -ExeArgs @("$IdentityTool", "--install", "`"$InstallRoot`"")
+}
+
 # 4. Synchronize database state (Connections preserved, Combos untouched)
-Write-Host "`n[4/5] Synchronizing database state and providers..." -ForegroundColor Yellow
+Write-Host "`n[5/6] Synchronizing database state and providers..." -ForegroundColor Yellow
 if ((Test-Path $RestoreScript) -and (Test-Path $ExportFile)) {
     Invoke-NativeChecked -Label "state restore" -Exe $NodeExe -ExeArgs @("$RestoreScript") | Out-Null
 } else {
@@ -154,7 +194,7 @@ if ((Test-Path $RestoreScript) -and (Test-Path $ExportFile)) {
 }
 
 # 5. Launch 9Router and verify it is actually running before any success claim
-Write-Host "`n[5/5] Launching updated 9Router..." -ForegroundColor Yellow
+Write-Host "`n[6/6] Launching updated 9Router..." -ForegroundColor Yellow
 if ($SkipLaunch) {
     Write-Host "Launch skipped by -SkipLaunch; launch verification NOT performed." -ForegroundColor Yellow
 } else {

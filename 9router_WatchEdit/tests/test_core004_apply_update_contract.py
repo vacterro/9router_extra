@@ -75,6 +75,8 @@ def _sandbox(tmp_path: Path, npm_exit: int = 0, node_exit: int = 0, backup_exit:
         "package": package,
         "npm": _fake_cmd(tmp_path / "fake_npm.cmd", npm_exit, tmp_path / "npm.marker"),
         "node": _fake_cmd(tmp_path / "fake_node.cmd", node_exit, tmp_path / "node.marker"),
+        "identity": _fake_cmd(tmp_path / "fake_identity.cmd", 0, tmp_path / "identity.marker"),
+        "install": tmp_path / "install",
         "backup": _fake_backup_script(tmp_path / "fake_backup.ps1", backup_exit),
         "restore": restore,
         "export": export,
@@ -83,7 +85,7 @@ def _sandbox(tmp_path: Path, npm_exit: int = 0, node_exit: int = 0, backup_exit:
     }
 
 
-def _args(env: dict, launch: str | None = None) -> list[str]:
+def _args(env: dict, launch: str | None = None, *, identity: bool = True) -> list[str]:
     args = [
         "-NpmExe", str(env["npm"]),
         "-NodeExe", str(env["node"]),
@@ -99,6 +101,9 @@ def _args(env: dict, launch: str | None = None) -> list[str]:
         args.append("-SkipLaunch")
     else:
         args += ["-LaunchCommand", launch, "-LaunchVerifySeconds", "1"]
+    if identity:
+        args += ["-PythonExe", str(env["identity"]), "-IdentityTool", str(SCRIPT),
+                 "-InstallRoot", str(env["install"])]
     return args
 
 
@@ -188,3 +193,48 @@ def test_static_contract_every_native_call_is_checked_and_banner_is_last(tmp_pat
 
     # failure must preserve the backup and never claim success
     assert "Safety backup preserved" in text
+
+
+def test_identity_gate_runs_after_install_and_before_the_banner(tmp_path):
+    """T-119: an upgrade must not silently ship a stale client identity.
+
+    The WorkBuddy HTTP 400 code 11128 came back because the identity was a
+    post-install patch that the next npm install overwrote. The gate therefore
+    has to run on every upgrade, before success is claimed.
+    """
+    env = _sandbox(tmp_path)
+    gate = tmp_path / "fake_gate.cmd"
+    marker = tmp_path / "gate.marker"
+    _fake_cmd(gate, 0, marker)
+
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
+         *_args(env, identity=False), "-PythonExe", str(gate), "-IdentityTool", str(SCRIPT),
+         "-InstallRoot", str(tmp_path / "install")],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.exists(), "the client-identity gate must actually run"
+    assert "Verifying installed client identities" in result.stdout
+    # order: install, gate, banner
+    assert result.stdout.index("Installing") < result.stdout.index("Verifying installed client identities")
+    assert result.stdout.index("Verifying installed client identities") < result.stdout.index(BANNER)
+
+
+def test_a_failing_identity_gate_aborts_the_upgrade_without_a_banner(tmp_path):
+    env = _sandbox(tmp_path)
+    gate = tmp_path / "fake_gate_fail.cmd"
+    _fake_cmd(gate, 5)
+
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
+         *_args(env, identity=False), "-PythonExe", str(gate), "-IdentityTool", str(SCRIPT),
+         "-InstallRoot", str(tmp_path / "install")],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert BANNER not in result.stdout
+    assert "UPGRADE FAILED" in result.stdout
+    assert _backup_dirs(env), "safety backup must be preserved"
